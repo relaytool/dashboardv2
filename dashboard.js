@@ -2631,32 +2631,98 @@ function bindQuickMenu() {
         return {...report, url: report.spreadsheetUrl, dateCount: dateGroups.length, transactionCount: data.transactions.length};
     }
 
-    const CLIENT_LEDGER_PDF_SRC = [
-        "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
-        "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js"
-    ];
+    const CLIENT_LEDGER_PDF_SOURCES = {
+        jsPDF: [
+            "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+            "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
+            "https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"
+        ],
+        autoTable: [
+            "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js",
+            "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js",
+            "https://unpkg.com/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js"
+        ]
+    };
     let pdfJsLoadPromise = null;
-    function ensurePdfJs() {
-        if (window.jspdf?.jsPDF?.prototype?.autoTable) return Promise.resolve(window.jspdf.jsPDF);
-        if (pdfJsLoadPromise) return pdfJsLoadPromise;
-        pdfJsLoadPromise = new Promise((resolve, reject) => {
+    function hasClientLedgerPdfSupport() {
+        const jsPDF = window.jspdf?.jsPDF;
+        return Boolean(jsPDF && (typeof jsPDF.API?.autoTable === "function" || typeof jsPDF.prototype?.autoTable === "function"));
+    }
+    function loadExternalScript(sources, isReady) {
+        return new Promise((resolve, reject) => {
+            if (isReady()) return resolve();
             let index = 0;
-            const next = () => {
-                if (index >= CLIENT_LEDGER_PDF_SRC.length) {
-                    if (window.jspdf?.jsPDF?.prototype?.autoTable) resolve(window.jspdf.jsPDF);
-                    else reject(new Error("PDF library failed to load."));
-                    return;
-                }
+            const tryNext = () => {
+                if (isReady()) return resolve();
+                if (index >= sources.length) return reject(new Error("PDF library failed to load. Please check your internet connection or browser content blocker."));
                 const script = document.createElement("script");
-                script.src = CLIENT_LEDGER_PDF_SRC[index++];
+                script.src = sources[index++];
                 script.async = true;
-                script.onload = next;
-                script.onerror = () => reject(new Error("PDF library failed to load."));
+                script.onload = () => isReady() ? resolve() : tryNext();
+                script.onerror = tryNext;
                 document.head.appendChild(script);
             };
-            next();
+            tryNext();
+        });
+    }
+    function ensurePdfJs() {
+        if (hasClientLedgerPdfSupport()) return Promise.resolve(window.jspdf.jsPDF);
+        if (pdfJsLoadPromise) return pdfJsLoadPromise;
+        pdfJsLoadPromise = (async () => {
+            const hasJsPdf = () => typeof window.jspdf?.jsPDF === "function";
+            await loadExternalScript(CLIENT_LEDGER_PDF_SOURCES.jsPDF, hasJsPdf);
+            await loadExternalScript(CLIENT_LEDGER_PDF_SOURCES.autoTable, hasClientLedgerPdfSupport);
+            if (!hasClientLedgerPdfSupport()) throw new Error("PDF library failed to load. Please check your internet connection or browser content blocker.");
+            return window.jspdf.jsPDF;
+        })().catch(error => {
+            pdfJsLoadPromise = null;
+            throw error;
         });
         return pdfJsLoadPromise;
+    }
+
+    function buildClientLedgerPrintHtml(client, data, periodLabel, includePhotos) {
+        const rowsHtml = exportDateGroups(data).map(dateGroup => {
+            const dailyByAsset = new Map(dateGroup.dailyAssets.map(item => [item.asset, item]));
+            const body = dateGroup.rows.map(row => {
+                const direction = clientLedgerDirection(row.item.movement);
+                const qty = Number(row.item.quantity) || 0;
+                const daily = dailyByAsset.get(row.asset);
+                const photo = includePhotos && row.item.image ? `<div class="photo-cell"><img src="${escapeAttr(row.item.image)}" alt="Transaction photo"></div>` : "";
+                return `<tr><td>${escapeHtml(client)}</td><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.time)}</td><td>${escapeHtml(row.asset)}</td><td>${direction === "Sent" ? formatNumber(qty) : "0"}</td><td>${direction === "Received" ? formatNumber(qty) : "0"}</td><td>${escapeHtml(formatSignedNumber(daily?.difference || 0))}</td><td>${escapeHtml(formatSignedNumber(row.allTimeDifference))}</td><td>${escapeHtml(String(row.item.comment || ""))}</td><td>${photo}</td></tr>`;
+            }).join("");
+            const summaries = exportDateSummaryRows(dateGroup.rows);
+            const received = summaries.filter(item => item.receivedQty).map(item => `<tr><td>${escapeHtml(item.asset)}</td><td>${formatNumber(item.receivedQty)}</td></tr>`).join("");
+            const sent = summaries.filter(item => item.sentQty).map(item => `<tr><td>${escapeHtml(item.asset)}</td><td>${formatNumber(item.sentQty)}</td></tr>`).join("");
+            return `<section class="date-block"><div class="date-title">Date: ${escapeHtml(dateGroup.date)}</div><table class="ledger"><thead><tr>${ledgerMainHeaders().map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table><div class="summary-row"><table><thead><tr><th>Received</th><th>Quantity</th></tr></thead><tbody>${received || '<tr><td colspan="2">0</td></tr>'}</tbody></table><table><thead><tr><th>Sent</th><th>Quantity</th></tr></thead><tbody>${sent || '<tr><td colspan="2">0</td></tr>'}</tbody></table></div></section>`;
+        }).join("");
+        const assetRows = data.assets.map(item => `<tr><td>${escapeHtml(item.asset)}</td><td>${formatNumber(item.balance)}</td></tr>`).join("");
+        return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(client)} Movements</title><style>
+@page{size:A4 landscape;margin:9mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;font-size:9px;margin:0}.title{font-size:19px;font-weight:700;margin:0 0 4px}.period{font-size:10px;margin-bottom:9px}.asset-summary{width:52mm;border-collapse:collapse;margin-bottom:9px}.asset-summary th,.asset-summary td,.ledger th,.ledger td,.summary-row th,.summary-row td{border:1px solid #777;padding:2px 3px}.asset-summary th,.ledger th,.summary-row th{background:#211b32;color:#fff;font-weight:700}.asset-summary td:last-child,.ledger td:nth-child(5),.ledger td:nth-child(6),.ledger td:nth-child(7),.ledger td:nth-child(8){text-align:right}.ledger{width:100%;border-collapse:collapse;table-layout:fixed}.ledger th,.ledger td{font-size:7px;vertical-align:middle;word-break:break-word}.ledger th:nth-child(1){width:11%}.ledger th:nth-child(2){width:7%}.ledger th:nth-child(3){width:6%}.ledger th:nth-child(4){width:11%}.ledger th:nth-child(5){width:7%}.ledger th:nth-child(6){width:8%}.ledger th:nth-child(7){width:8%}.ledger th:nth-child(8){width:9%}.ledger th:nth-child(9){width:15%}.ledger th:nth-child(10){width:8%}.date-block{break-inside:avoid;margin-top:7px}.date-title{font-size:11px;font-weight:700;margin-bottom:3px}.summary-row{display:flex;gap:10px;margin-top:4px;break-inside:avoid}.summary-row table{width:55mm;border-collapse:collapse}.summary-row th,.summary-row td{font-size:8px}.photo-cell img{max-width:28mm;max-height:16mm;display:block;margin:auto}@media print{.no-print{display:none}}
+</style></head><body><div class="title">${escapeHtml(client)} Movements</div><div class="period">Period: ${escapeHtml(periodLabel)}</div><table class="asset-summary"><thead><tr><th>Asset Type</th><th>Quantity</th></tr></thead><tbody>${assetRows}</tbody></table>${rowsHtml}</body></html>`;
+    }
+
+    async function printClientLedgerPdfFallback(client, data, periodLabel, includePhotos) {
+        const printWindow = window.open("", "_blank", "noopener,noreferrer,width=1200,height=900");
+        if (!printWindow) throw new Error("The PDF library could not be loaded and the browser blocked the print window. Please allow pop-ups for this site and try again.");
+        printWindow.document.open();
+        printWindow.document.write(buildClientLedgerPrintHtml(client, data, periodLabel, includePhotos));
+        printWindow.document.close();
+        await new Promise(resolve => {
+            const waitForImages = () => {
+                const images = Array.from(printWindow.document.images || []);
+                if (!images.length) return setTimeout(resolve, 250);
+                let remaining = images.length;
+                const done = () => { if (--remaining <= 0) setTimeout(resolve, 250); };
+                images.forEach(img => {
+                    if (img.complete) done();
+                    else { img.addEventListener("load", done, {once:true}); img.addEventListener("error", done, {once:true}); }
+                });
+            };
+            setTimeout(waitForImages, 100);
+        });
+        printWindow.focus();
+        printWindow.print();
     }
 
     async function buildClientLedgerPdf(client, data, periodLabel, includePhotos) {
@@ -2757,7 +2823,15 @@ function bindQuickMenu() {
             if(status)status.textContent="PDF exported.";
         } catch(error) {
             console.error("Client ledger PDF export failed:",error);
-            if(status){status.textContent=error?.message||"The PDF could not be generated.";status.classList.add("error");}
+            if (/^PDF library failed to load\./i.test(error?.message || "")) {
+                try {
+                    if(status){status.textContent="PDF library unavailable. Opening the A4 print-to-PDF version…";status.classList.remove("error");}
+                    await printClientLedgerPdfFallback(client, data, periodLabel, includePhotos);
+                    if(status)status.textContent="Print-to-PDF opened. Choose Save as PDF in the browser print dialog.";
+                } catch (fallbackError) {
+                    if(status){status.textContent=fallbackError?.message||"The PDF could not be generated.";status.classList.add("error");}
+                }
+            } else if(status){status.textContent=error?.message||"The PDF could not be generated.";status.classList.add("error");}
         } finally { if(button){button.disabled=false;button.textContent="Export PDF";} }
     }
 
