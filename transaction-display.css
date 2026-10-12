@@ -126,3 +126,10 @@
   .transaction-truck-icon{width:34px;height:34px;flex-basis:34px}
   .batch-entry-fields select,.batch-asset-row select,.batch-asset-row input{font-size:16px}
 }
+
+
+/* Vehicle registration extracted from each transaction comment. */
+.transaction-vehicle-reg{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 8px;border:1px solid #cbdaf4;border-radius:999px;background:#f1f6ff;color:#344f80;font-size:10px;line-height:1.2;white-space:normal}
+.transaction-vehicle-reg>span{font-weight:700;color:#667085}
+.transaction-vehicle-reg>strong{font-size:11px;font-weight:900;letter-spacing:.045em;color:#1f3f77;overflow-wrap:anywhere}
+@media(max-width:760px){.transaction-vehicle-reg{gap:4px;padding:4px 7px}.transaction-vehicle-reg>strong{font-size:10px}}

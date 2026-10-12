@@ -9,8 +9,8 @@
 
     <title>FM Assets Dashboard</title>
 
-    <link rel="stylesheet" href="dashboard.css?v=client-export-20261008-v1">
-<link rel="stylesheet" href="transaction-display.css?v=grouped-movements-20261005">
+    <link rel="stylesheet" href="dashboard.css?v=client-audit-20261012-v1">
+<link rel="stylesheet" href="transaction-display.css?v=vehicle-reg-20261012-v1">
     <link rel="stylesheet" href="app-ui-polish.css?v=ui-20261005-mobile-v5">
 </head>
 
@@ -630,9 +630,9 @@
             </div>
 
 
-            <div class="transaction-card-list" id="client-details-transactions"></div>
-
             <div id="client-details-transaction-summary" class="transaction-summary hidden" aria-live="polite"></div>
+
+            <div class="transaction-card-list" id="client-details-transactions"></div>
 
         </section>
 
@@ -669,9 +669,13 @@
                 <div id="client-ledger-export-assets" class="client-ledger-export-assets" role="group" aria-label="Asset types"></div>
                 <small class="muted">Select one or more assets, or leave all selected.</small>
             </div>
+            <label class="client-ledger-week-field">
+                Week to report
+                <input type="week" id="client-ledger-export-week" aria-label="Choose the week for the weekly PDF report">
+            </label>
             <label class="client-ledger-export-check">
                 <input type="checkbox" id="client-ledger-export-photos" checked>
-                <span>Include transaction photo links / previews where available</span>
+                <span>Include and archive transaction photos (compact previews where available)</span>
             </label>
             <p id="client-ledger-export-status" class="status" aria-live="polite"></p>
         </div>
@@ -679,6 +683,7 @@
             <button type="button" class="secondary" id="cancel-client-ledger-export">Cancel</button>
             <div class="client-ledger-export-action-group">
                 <button type="button" class="secondary" id="run-client-ledger-pdf">Export PDF</button>
+                <button type="button" class="secondary" id="run-client-ledger-week-pdf">Export Weekly PDF</button>
                 <button type="button" class="primary" id="run-client-ledger-export">Save XLSX + Client Sheet</button>
             </div>
         </div>
@@ -885,9 +890,9 @@
 
 <script src="config.js?v=eod-ledger-20261003-merged"></script><script src="sheet-writer.js?v=sheet-writer-20261007-v1"></script>
 <script src="movement-batch.js?v=multi-client-20261005"></script>
-<script src="transaction-display-utils.js?v=shared-20261008-audit-order-v1"></script>
+<script src="transaction-display-utils.js?v=vehicle-reg-20261012-v1"></script>
 <script src="routine-alert-utils.js?v=eod-ledger-20261003-merged"></script>
-<script src="dashboard.js?v=client-export-20261008-v2"></script>
+<script src="dashboard.js?v=client-audit-20261012-v1"></script>
 
 </body>
 </html>

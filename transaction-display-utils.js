@@ -42,6 +42,70 @@
     return Number.isFinite(ms) ? `date:${ms}` : `raw:${String(value || "").trim()}`;
   }
 
+  // Registration comments are normally entered first, sometimes with a short
+  // label such as "Vehicle Reg:". Match complete, familiar UK and European
+  // plate formats from the beginning of the comment to avoid guessing from
+  // unrelated words later in a note.
+  function extractVehicleRegistration(comment) {
+    let text = String(comment || "").normalize("NFKC").trim().toUpperCase();
+    if (!text) return "";
+    text = text.replace(/^(?:(?:VEHICLE\s*)?(?:REG(?:ISTRATION)?|VRM|PLATE|NUMBER\s*PLATE)\s*[:#=-]?\s*)+/i, "");
+    text = text.replace(/^[\s:;,|()[\]{}]+/, "");
+    if (!text) return "";
+
+    const patterns = [
+      // Great Britain current plates, plus common older and dateless styles.
+      /^[A-Z]{2}\s?\d{2}\s?[A-Z]{3}(?=\b|$)/,
+      /^[A-Z]\s?\d{1,3}\s?[A-Z]{3}(?=\b|$)/,
+      /^[A-Z]{3}\s?\d{1,3}\s?[A-Z](?=\b|$)/,
+      /^(?:[A-Z]{3}\s?\d{3,4}|\d{1,4}\s?[A-Z]{3})(?=\b|$)/,
+      // Ireland.
+      /^\d{2,3}[- ]?[A-Z]{1,2}[- ]?\d{1,6}(?=\b|$)/,
+      // France, Italy and Spain.
+      /^[A-Z]{2}[- ]?\d{3}[- ]?[A-Z]{2}(?=\b|$)/,
+      /^[A-Z]{2}\s?\d{3}\s?[A-Z]{2}(?=\b|$)/,
+      /^\d{4}[- ]?[BCDFGHJKLMNPRSTVWXYZ]{3}(?=\b|$)/,
+      // Portugal and common Dutch series.
+      /^\d{2}[- ]?[A-Z]{2}[- ]?\d{2}(?=\b|$)/,
+      /^[A-Z]{2}[- ]?\d{2}[- ]?[A-Z]{2,3}(?=\b|$)/,
+      /^[A-Z]{2}[- ]?\d{3}[- ]?[A-Z](?=\b|$)/,
+      /^\d[- ]?[A-Z]{3}[- ]?\d{2}(?=\b|$)/,
+      /^\d{2}[- ]?[A-Z]{3}[- ]?\d(?=\b|$)/,
+      /^[A-Z]{3}[- ]?\d{2}[- ]?[A-Z](?=\b|$)/,
+      // Germany, Austria and several central/eastern European formats.
+      /^[A-ZÄÖÜ]{1,3}[- ]+[A-Z]{1,2}[- ]?\d{1,4}(?=\b|$)/,
+      /^[A-Z]{2,3}\s?\d[A-Z0-9]{4,5}(?=\b|$)/,
+      /^[A-Z]{3}[- ]?\d{3}(?=\b|$)/,
+      /^\d[A-Z]\d\s?\d{4}(?=\b|$)/,
+      /^[A-Z]{4}[- ]?\d{3}(?=\b|$)/,
+      /^[A-Z]{3}[- ]?\d{4}(?=\b|$)/,
+      /^[A-Z]{2}\s?\d{2}\s?[A-Z]{3}(?=\b|$)/,
+      /^[A-Z]{1,2}\s?\d{4}\s?[A-Z]{1,2}(?=\b|$)/,
+      /^[A-Z]{2}\s?\d{3,4}\s?[A-Z]{1,2}(?=\b|$)/,
+      /^[A-Z]{2}\s?\d{3}[A-Z]{2}(?=\b|$)/,
+      /^\d[- ]?[A-Z]{3}[- ]?\d{3}(?=\b|$)/,
+      /^[A-Z]{2}\s?\d{5}(?=\b|$)/,
+      // Additional EU country series: Latvia, Estonia, Romania, Slovenia,
+      // Austria and Luxembourg. These are checked before broad legacy UK
+      // formats so their trailing letters/numbers are not lost.
+      /^[A-Z]{2}[- ]?\d{4}(?=\b|$)/,
+      /^\d{3}[- ]?[A-Z]{3}(?=\b|$)/,
+      /^[A-Z]{1,2}[- ]?\d{1,5}[A-Z]{1,2}(?=\b|$)/,
+      /^[A-Z]{2}[- ]?[A-Z]{2}[- ]?\d{3,4}(?=\b|$)/,
+      /^[A-Z]{2}\s?\d{2}\s?[A-Z]{3}(?=\b|$)/,
+      /^\d{1,4}[- ]?[A-Z]{1,2}(?=\b|$)/,
+      // Northern Ireland / other legacy UK plates. Requiring 3-4 digits
+      // avoids treating short notes such as "HSC 10 pallets" as a plate.
+      /^[A-Z]{1,3}\s+\d{3,4}(?=\b|$)/
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return match[0].replace(/\s+/g, " ").trim();
+    }
+    return "";
+  }
+
   function groupTransactions(transactions = []) {
     const groups = new Map();
     (transactions || []).forEach((item, index) => {
@@ -58,6 +122,7 @@
           totalQuantity: 0,
           image: "",
           comment: "",
+          vehicleReg: "",
           originalIndexes: [],
           lastIndex: index,
           sortTimestamp: timestampMs(item?.timestamp)
@@ -74,6 +139,7 @@
       group.totalQuantity += quantity;
       if (!group.image && item?.image) group.image = item.image;
       if (!group.comment && item?.comment) group.comment = item.comment;
+      if (!group.vehicleReg) group.vehicleReg = extractVehicleRegistration(item?.comment);
       if (!group.movements[movement]) group.movements[movement] = [];
       group.movements[movement].push({
         asset: String(item?.asset || "Unknown asset").trim() || "Unknown asset",
@@ -144,6 +210,7 @@
 
   window.FM_TRANSACTION_DISPLAY = {
     canonicalMovement,
+    extractVehicleRegistration,
     movementLabel,
     movementClass,
     groupTransactions,

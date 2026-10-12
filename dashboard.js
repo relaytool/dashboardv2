@@ -46,7 +46,8 @@
         clients: [],
         clientListRows: [],
         auditVisibleRows: [],
-        clientDetailsRows: []
+        clientDetailsRows: [],
+        clientDetailsVisibleCount: 5
     };
 
 
@@ -192,6 +193,12 @@ document.addEventListener(
             if (button) openInfoModal(Number(button.dataset.infoIndex));
         });
         $("client-details-transactions")?.addEventListener("click", event => {
+            const loadMore = event.target.closest("[data-client-load-more]");
+            if (loadMore) {
+                state.clientDetailsVisibleCount += 5;
+                renderClientDetailsTransactionList();
+                return;
+            }
             const button = event.target.closest("[data-client-info-index]");
             if (button) openClientTransactionInfo(Number(button.dataset.clientInfoIndex));
         });
@@ -216,6 +223,7 @@ document.addEventListener(
         $("cancel-client-ledger-export")?.addEventListener("click", closeClientLedgerExport);
         $("run-client-ledger-export")?.addEventListener("click", runClientLedgerExport);
         $("run-client-ledger-pdf")?.addEventListener("click", runClientLedgerPdfExport);
+        $("run-client-ledger-week-pdf")?.addEventListener("click", runClientLedgerWeeklyPdfExport);
         $("client-ledger-export-select-all")?.addEventListener("click", selectAllClientLedgerExportAssets);
         $("client-ledger-export-assets")?.addEventListener("change", handleClientLedgerAssetSelectionChange);
         $("clear-client-details-filters")?.addEventListener("click", () => {
@@ -1551,12 +1559,10 @@ function bindQuickMenu() {
             renderClientAssetGraph(client, assets[0]?.asset || "");
 
             const groups = FM_TRANSACTION_DISPLAY.groupTransactions(transactions);
-            $("client-details-transactions").innerHTML = groups.length
-                ? groups.map((group, i) => renderTransactionCard(group, i, "data-client-info-index")).join("")
-                : `<div class="client-assets-empty"><strong>No asset transactions recorded for this client.</strong><span>Try another day or asset type.</span></div>`;
-
-            renderTransactionSummary($("client-details-transaction-summary"), transactions, "Client totals");
             state.clientDetailsRows = groups;
+            state.clientDetailsVisibleCount = 5;
+            renderTransactionSummary($("client-details-transaction-summary"), transactions, "Client totals");
+            renderClientDetailsTransactionList();
             $("client-details-subtitle").textContent = `${assets.length} asset type${assets.length === 1 ? "" : "s"} · ${groups.length} grouped movement${groups.length === 1 ? "" : "s"} · ${transactions.length} ledger line${transactions.length === 1 ? "" : "s"}`;
         };
 
@@ -1567,6 +1573,26 @@ function bindQuickMenu() {
         if (dateSelect && $("dashboard-filter-date")) dateSelect.value = $("dashboard-filter-date").value || "";
         render();
         $("client-details-modal").classList.remove("hidden");
+    }
+
+    function renderClientDetailsTransactionList() {
+        const container = $("client-details-transactions");
+        if (!container) return;
+        const groups = state.clientDetailsRows || [];
+        if (!groups.length) {
+            container.innerHTML = `<div class="client-assets-empty"><strong>No asset transactions recorded for this client.</strong><span>Try another day or asset type.</span></div>`;
+            return;
+        }
+        const visibleCount = Math.min(groups.length, Math.max(5, state.clientDetailsVisibleCount || 5));
+        const cards = groups.slice(0, visibleCount)
+            .map((group, index) => renderTransactionCard(group, index, "data-client-info-index")).join("");
+        const remaining = groups.length - visibleCount;
+        const pager = remaining > 0
+            ? `<div class="client-details-load-more-wrap"><span>Showing ${visibleCount.toLocaleString()} of ${groups.length.toLocaleString()} movements</span><button type="button" class="secondary" data-client-load-more>Load 5 more</button></div>`
+            : groups.length > 5
+                ? `<div class="client-details-load-more-wrap"><span>Showing all ${groups.length.toLocaleString()} movements</span></div>`
+                : "";
+        container.innerHTML = cards + pager;
     }
 
     function populateClientDetailsAssetFilter(client) {
@@ -2261,6 +2287,7 @@ function bindQuickMenu() {
             .map(item => transactionDateKey(item.timestamp)).filter(Boolean).sort();
         if ($("client-ledger-export-from")) $("client-ledger-export-from").value = dateFilter || dates[0] || "";
         if ($("client-ledger-export-to")) $("client-ledger-export-to").value = dateFilter || dates[dates.length - 1] || "";
+        if ($("client-ledger-export-week")) $("client-ledger-export-week").value = isoWeekInputForDateKey(dateFilter || dates[dates.length - 1] || transactionDateKey(new Date()));
         renderClientLedgerExportAssets(client);
         const status = $("client-ledger-export-status");
         if (status) { status.textContent = ""; status.classList.remove("error"); }
@@ -2324,6 +2351,274 @@ function bindQuickMenu() {
         return[...groups.entries()].sort((a,b)=>b[0].localeCompare(a[0])).map(([date,rows])=>({date,rows,dailyAssets:data.dailyRows.filter(item=>item.date===date).sort((a,b)=>a.asset.localeCompare(b.asset))}));
     }
 
+    // Adjacent asset rows sharing the same date/time belong to one physical movement.
+    // These groups drive PDF rowspans, Excel/Sheets merged cells, and one photo per movement.
+    function ledgerTimestampGroups(rows) {
+        const groups = [];
+        (rows || []).forEach((row, index) => {
+            const key = `${row.date || ""}\u0000${row.time || ""}`;
+            let group = groups[groups.length - 1];
+            if (!group || group.key !== key) {
+                group = {key, startIndex:index, endIndex:index + 1, count:1, rows:[row], comment:"", images:[], image:""};
+                groups.push(group);
+            } else {
+                group.endIndex = index + 1;
+                group.count += 1;
+                group.rows.push(row);
+            }
+        });
+        for (const group of groups) {
+            group.comment = [...new Set(group.rows.map(row => String(row?.item?.comment || "").trim()).filter(Boolean))].join("\n");
+            group.images = [...new Set(group.rows.map(row => String(row?.item?.image || "").trim()).filter(Boolean))];
+            group.image = group.images[0] || "";
+        }
+        return groups;
+    }
+
+    function isoWeekInputForDateKey(value) {
+        const source = /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : transactionDateKey(new Date());
+        const parts = source.split("-").map(Number);
+        const d = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+        d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+        const year = d.getUTCFullYear();
+        const yearStart = new Date(Date.UTC(year, 0, 1));
+        const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+        return `${year}-W${String(week).padStart(2, "0")}`;
+    }
+
+    function isoWeekDateRange(value) {
+        const match = String(value || "").match(/^(\d{4})-W(\d{2})$/);
+        if (!match) return null;
+        const year = Number(match[1]), week = Number(match[2]);
+        if (week < 1 || week > 53) return null;
+        const jan4 = new Date(Date.UTC(year, 0, 4));
+        const mondayOffset = (jan4.getUTCDay() + 6) % 7;
+        const monday = new Date(Date.UTC(year, 0, 4 - mondayOffset + (week - 1) * 7));
+        // Reject an invalid week 53 instead of silently rolling into another ISO year.
+        const check = isoWeekInputForDateKey(monday.toISOString().slice(0, 10));
+        if (check !== `${year}-W${String(week).padStart(2, "0")}`) return null;
+        const sunday = new Date(monday.getTime() + 6 * 86400000);
+        return {from:monday.toISOString().slice(0, 10), to:sunday.toISOString().slice(0, 10), value:`${year}-W${String(week).padStart(2, "0")}`};
+    }
+
+    const clientLedgerExportPhotoFolderPromises = new Map();
+    const clientLedgerExportPhotoFolderIds = new Map();
+    const clientLedgerExportPhotoFilesByFolder = new Map();
+
+    const CLIENT_LEDGER_PHOTO_ARCHIVE_ROOT_ID =
+        CONFIG.DRIVE_CLIENT_LEDGER_PHOTOS_PARENT_FOLDER_ID || "1hs6fIiuxvqmj7VL4dsqowu6EANgauoik";
+
+    function clientLedgerPhotoFolderName(client) {
+        const displayClient = String(client || "Unknown Client").trim().replace(/\s+/g, " ") || "Unknown Client";
+        return `${displayClient.toLocaleUpperCase()} MOVEMENTS`;
+    }
+
+    async function getOrCreateClientLedgerPhotoFolder(client) {
+        const displayClient = String(client || "Unknown Client").trim().replace(/\s+/g, " ") || "Unknown Client";
+        const clientKey = displayClient.toLocaleLowerCase();
+        if (clientLedgerExportPhotoFolderIds.has(clientKey)) return clientLedgerExportPhotoFolderIds.get(clientKey);
+        if (clientLedgerExportPhotoFolderPromises.has(clientKey)) return clientLedgerExportPhotoFolderPromises.get(clientKey);
+
+        const pending = (async () => {
+            const parent = CLIENT_LEDGER_PHOTO_ARCHIVE_ROOT_ID;
+            const name = clientLedgerPhotoFolderName(displayClient);
+            const query = [
+                `name = '${escapeDriveQuery(name)}'`,
+                `mimeType = 'application/vnd.google-apps.folder'`,
+                `'${parent}' in parents`,
+                `trashed = false`
+            ].join(" and ");
+            const params = new URLSearchParams({
+                q: query,
+                pageSize: "10",
+                fields: "files(id,name,mimeType)",
+                supportsAllDrives: "true",
+                includeItemsFromAllDrives: "true"
+            });
+            const found = await fetchJson(`${DRIVE_API}?${params.toString()}`, {headers:authHeaders()});
+            let id = (found.files || []).find(file => file.mimeType === "application/vnd.google-apps.folder")?.id || "";
+            if (!id) {
+                const created = await fetchJson(`${DRIVE_API}?supportsAllDrives=true&fields=id,name,mimeType`, {
+                    method: "POST",
+                    headers: {...authHeaders(), "Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        name,
+                        mimeType: "application/vnd.google-apps.folder",
+                        parents: [parent],
+                        description: `Client ledger report photos for ${displayClient}. Original transaction photos are not moved or deleted.`
+                    })
+                });
+                id = created.id || "";
+            }
+            if (!id) throw new Error(`Google Drive did not return a folder ID for ${name}.`);
+            clientLedgerExportPhotoFolderIds.set(clientKey, id);
+            return id;
+        })().catch(error => {
+            clientLedgerExportPhotoFolderPromises.delete(clientKey);
+            throw error;
+        });
+        clientLedgerExportPhotoFolderPromises.set(clientKey, pending);
+        return pending;
+    }
+
+    async function loadClientLedgerPhotoFolderFiles(folderId) {
+        if (clientLedgerExportPhotoFilesByFolder.has(folderId)) {
+            return clientLedgerExportPhotoFilesByFolder.get(folderId);
+        }
+        const files = new Map();
+        let pageToken = "";
+        do {
+            const params = new URLSearchParams({
+                q: `'${folderId}' in parents and trashed = false`,
+                pageSize: "1000",
+                fields: "nextPageToken,files(id,name,webViewLink,mimeType)",
+                supportsAllDrives: "true",
+                includeItemsFromAllDrives: "true"
+            });
+            if (pageToken) params.set("pageToken", pageToken);
+            const result = await fetchJson(`${DRIVE_API}?${params.toString()}`, {headers:authHeaders()});
+            for (const file of (result.files || [])) {
+                const match = String(file.name || "").match(/^ledger-photo-.+__([A-Za-z0-9_-]+)$/);
+                if (match && file.id) files.set(match[1], file);
+            }
+            pageToken = result.nextPageToken || "";
+        } while (pageToken);
+        clientLedgerExportPhotoFilesByFolder.set(folderId, files);
+        return files;
+    }
+
+    async function archiveClientLedgerPhotosForExport(data, includePhotos) {
+        const rootUrl = `https://drive.google.com/drive/folders/${CLIENT_LEDGER_PHOTO_ARCHIVE_ROOT_ID}`;
+        if (!includePhotos) return {data, copied:0, archived:0, folderUrl:rootUrl, warning:""};
+
+        // Store a distinct copy for each client, even when one source photo was
+        // attached to a batch containing multiple clients.
+        const sourceByClientAndId = new Map();
+        for (const row of (data?.transactions || [])) {
+            const url = String(row?.item?.image || "").trim();
+            const sourceId = FM_MEDIA?.driveFileIdFromLink?.(url) || "";
+            if (!sourceId) continue;
+            const client = String(row?.item?.client || data?.client || "Unknown Client").trim() || "Unknown Client";
+            const clientKey = client.toLocaleLowerCase();
+            const key = `${clientKey}\u0000${sourceId}`;
+            if (!sourceByClientAndId.has(key)) {
+                sourceByClientAndId.set(key, {key, sourceId, client, clientKey, url, row});
+            }
+        }
+        if (!sourceByClientAndId.size) return {data, copied:0, archived:0, folderUrl:rootUrl, warning:""};
+
+        const remappedUrls = new Map();
+        let copied = 0;
+        try {
+            const clients = [...new Map([...sourceByClientAndId.values()].map(info => [info.clientKey, info.client])).entries()];
+            const folderByClientKey = new Map();
+            await Promise.all(clients.map(async ([clientKey, client]) => {
+                folderByClientKey.set(clientKey, await getOrCreateClientLedgerPhotoFolder(client));
+            }));
+
+            const jobs = [];
+            const filesByClient = new Map();
+            for (const info of sourceByClientAndId.values()) {
+                const folderId = folderByClientKey.get(info.clientKey);
+                if (!filesByClient.has(info.clientKey)) {
+                    filesByClient.set(info.clientKey, await loadClientLedgerPhotoFolderFiles(folderId));
+                }
+                const files = filesByClient.get(info.clientKey);
+                const existing = files.get(info.sourceId);
+                if (existing?.id) {
+                    remappedUrls.set(info.key, existing.webViewLink || `https://drive.google.com/file/d/${existing.id}/view`);
+                } else {
+                    jobs.push({...info, folderId, files});
+                }
+            }
+
+            // Keep Drive API traffic modest for long histories with many photos.
+            for (let i = 0; i < jobs.length; i += 3) {
+                await Promise.all(jobs.slice(i, i + 3).map(async info => {
+                    try {
+                        const safeClient = String(info.client || "Client").replace(/[^a-z0-9]+/gi,"-").replace(/^-+|-+$/g,"").slice(0,40) || "Client";
+                        const safeDate = String(info.row?.date || "undated").replace(/[^0-9-]/g, "");
+                        const safeTime = String(info.row?.time || "").replace(/[^0-9]/g, "");
+                        const exportPhotoName = `ledger-photo-${safeClient}_${safeDate}_${safeTime}__${info.sourceId}`;
+                        const result = await fetchJson(`${DRIVE_API}/${encodeURIComponent(info.sourceId)}/copy?supportsAllDrives=true&fields=id,name,webViewLink,mimeType`, {
+                            method: "POST",
+                            headers: {...authHeaders(), "Content-Type": "application/json"},
+                            body: JSON.stringify({
+                                name: exportPhotoName,
+                                parents: [info.folderId],
+                                description: `Photo copy used in a client ledger report for ${info.client}.`,
+                                appProperties: {ledgerExportSourceId: info.sourceId, ledgerExportClient: info.clientKey}
+                            })
+                        });
+                        if (result?.id) {
+                            const file = {...result, name:exportPhotoName};
+                            info.files.set(info.sourceId, file);
+                            remappedUrls.set(info.key, file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`);
+                            copied += 1;
+                        }
+                    } catch (error) {
+                        console.warn(`Could not copy ledger photo ${info.sourceId} into ${clientLedgerPhotoFolderName(info.client)}:`, error);
+                    }
+                }));
+            }
+
+            const remappedData = {
+                ...data,
+                transactions:(data.transactions || []).map(row => {
+                    const original = String(row?.item?.image || "").trim();
+                    const sourceId = FM_MEDIA?.driveFileIdFromLink?.(original) || "";
+                    const client = String(row?.item?.client || data?.client || "Unknown Client").trim() || "Unknown Client";
+                    const key = `${client.toLocaleLowerCase()}\u0000${sourceId}`;
+                    const archivedUrl = sourceId ? remappedUrls.get(key) : "";
+                    return archivedUrl ? {...row, item:{...row.item, image:archivedUrl}} : row;
+                })
+            };
+            const unresolved = sourceByClientAndId.size - remappedUrls.size;
+            return {
+                data:remappedData,
+                copied,
+                archived:remappedUrls.size,
+                folderUrl:rootUrl,
+                warning:unresolved ? `${unresolved} photo copy/copies could not be archived; original photo links were kept.` : ""
+            };
+        } catch (error) {
+            console.warn("Client ledger photo archive unavailable; retaining source photo links:", error);
+            return {data, copied:0, archived:0, folderUrl:rootUrl, warning:"The client photo archive folder could not be accessed; original photo links were kept."};
+        }
+    }
+
+    async function compactLedgerImageForExport(loaded, maxDimension = 640, quality = 0.68) {
+        if (!loaded?.dataUrl || typeof document === "undefined") return loaded;
+        try {
+            const image = new Image();
+            image.decoding = "async";
+            image.src = loaded.dataUrl;
+            await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; });
+            const sourceWidth = image.naturalWidth || image.width || 1;
+            const sourceHeight = image.naturalHeight || image.height || 1;
+            const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight));
+            const width = Math.max(1, Math.round(sourceWidth * scale));
+            const height = Math.max(1, Math.round(sourceHeight * scale));
+            const canvas = document.createElement("canvas");
+            canvas.width = width; canvas.height = height;
+            const context = canvas.getContext("2d", {alpha:false});
+            if (!context) return loaded;
+            context.drawImage(image, 0, 0, width, height);
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", quality));
+            if (!blob) return loaded;
+            const dataUrl = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ""));
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+            return {dataUrl, extension:"jpeg"};
+        } catch (error) {
+            console.warn("Could not compress a ledger photo for export:", error);
+            return loaded;
+        }
+    }
+
     function styleWorksheetHeader(row) {
         row.font = {bold:true, color:{argb:"FFFFFFFF"}};
         row.fill = {type:"pattern", pattern:"solid", fgColor:{argb:"FF211B32"}};
@@ -2337,14 +2632,20 @@ function bindQuickMenu() {
         row.alignment = {vertical:"middle", wrapText:true};
         row.height = 26;
     }
-    async function addLedgerPhoto(workbook, worksheet, rowNumber, columnNumber, item, includePhotos) {
+    async function addLedgerPhoto(workbook, worksheet, rowNumber, columnNumber, item, includePhotos, imageIdCache = new Map()) {
         if (!includePhotos || !item?.image) return;
         try {
-            const loaded = await FM_MEDIA?.loadImageDataUrl?.(item.image, state.accessToken);
-            if (!loaded?.dataUrl) return;
-            const imageId = workbook.addImage({base64:loaded.dataUrl, extension:loaded.extension || "jpeg"});
-            worksheet.addImage(imageId, {tl:{col:columnNumber-1,row:rowNumber-1}, ext:{width:96,height:64}});
-            worksheet.getRow(rowNumber).height = Math.max(66, worksheet.getRow(rowNumber).height || 15);
+            const url = String(item.image).trim();
+            let imageId = imageIdCache.get(url);
+            if (imageId == null) {
+                const loaded = await FM_MEDIA?.loadImageDataUrl?.(url, state.accessToken);
+                if (!loaded?.dataUrl) return;
+                const compact = await compactLedgerImageForExport(loaded, 640, 0.68);
+                imageId = workbook.addImage({base64:compact.dataUrl, extension:compact.extension || "jpeg"});
+                imageIdCache.set(url, imageId);
+            }
+            worksheet.addImage(imageId, {tl:{col:columnNumber-1,row:rowNumber-1}, ext:{width:84,height:52}});
+            worksheet.getRow(rowNumber).height = Math.max(44, worksheet.getRow(rowNumber).height || 15);
         } catch(error) { console.warn("Client ledger photo embed failed:", error); }
     }
     function applyLedgerCellBorders(cell, color="FF2B2B2B") {
@@ -2367,7 +2668,59 @@ function bindQuickMenu() {
     }
 
     function ledgerMainHeaders() {
-        return ["Client","Date","Time","Asset type","Quantity sent","Quantity received","Difference for date","All-time difference","Comment","Picture"];
+        return ["Client", "Date", "Time", "Asset type", "Quantity sent", "Quantity received", "Comment", "Picture"];
+    }
+
+    function clientReportPhotoCell(item) {
+        const url = String(item?.image || "").trim();
+        if (!url) return "";
+        // Export links point to an archived Drive copy when archiving was available;
+        // source files are never moved or have their sharing settings changed.
+        return `=HYPERLINK("${url.replace(/"/g, '""')}","Open photo")`;
+    }
+
+    function legacyClientReportPhotoMatchKey(client, date, time, asset, direction, quantity, comment) {
+        const normalize = value => String(value ?? "").trim().toLowerCase();
+        const normalizedTime = normalize(time).slice(0, 8);
+        return [normalize(client), normalize(date), normalizedTime, normalize(asset), normalize(direction), Number(quantity) || 0, normalize(comment)].join("\u001f");
+    }
+
+    async function backfillLegacyClientReportPhotoLinks(spreadsheetId, rows) {
+        const sourcesByKey = new Map();
+        for (const item of getDashboardTransactions()) {
+            if (!item?.image) continue;
+            const {date, time} = exportDateTime(item);
+            const direction = clientLedgerDirection(item.movement);
+            if (!["Sent", "Received"].includes(direction)) continue;
+            const key = legacyClientReportPhotoMatchKey(item.client, date, time, item.asset, direction, item.quantity, item.comment);
+            if (!sourcesByKey.has(key)) sourcesByKey.set(key, []);
+            sourcesByKey.get(key).push(item);
+        }
+
+        const pictureValues = rows.map(row => [String(row?.[9] ?? "")]);
+        let changed = false;
+        rows.forEach((row, index) => {
+            const picture = String(row?.[9] ?? "").trim().toLowerCase();
+            if (!["photo", "open photo"].includes(picture)) return;
+            const sent = Number(String(row?.[4] ?? "0").replace(/,/g, "")) || 0;
+            const received = Number(String(row?.[5] ?? "0").replace(/,/g, "")) || 0;
+            const direction = sent ? "Sent" : received ? "Received" : "";
+            const quantity = sent || received;
+            if (!direction || !quantity) return;
+            const key = legacyClientReportPhotoMatchKey(row?.[0], row?.[1], row?.[2], row?.[3], direction, quantity, row?.[8]);
+            const queue = sourcesByKey.get(key);
+            const matchingItem = queue?.shift();
+            if (!matchingItem?.image) return;
+            pictureValues[index] = [clientReportPhotoCell(matchingItem)];
+            changed = true;
+        });
+
+        if (changed && rows.length) {
+            const range = `${quoteSheetName("Client Ledger")}!J1:J${rows.length}`;
+            await sheetsPut(`/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
+                range, majorDimension: "ROWS", values: pictureValues
+            });
+        }
     }
 
     function exportDateSummaryRows(rows) {
@@ -2389,26 +2742,29 @@ function bindQuickMenu() {
 
     function buildLedgerRowsForDate(client, dateGroup) {
         const rows = [];
-        rows.push(["Date", dateGroup.date, "", "", "", "", "", "", "", ""]);
+        rows.push(["Date", dateGroup.date, "", "", "", "", "", ""]);
         rows.push(ledgerMainHeaders());
-        const dailyByAsset = new Map(dateGroup.dailyAssets.map(item => [item.asset, item]));
-        for (const row of dateGroup.rows) {
+        const timestampGroups = ledgerTimestampGroups(dateGroup.rows);
+        const groupByRow = new Map();
+        timestampGroups.forEach(group => {
+            for (let i = group.startIndex; i < group.endIndex; i += 1) groupByRow.set(i, group);
+        });
+        dateGroup.rows.forEach((row, index) => {
             const direction = clientLedgerDirection(row.item.movement);
             const qty = Number(row.item.quantity) || 0;
-            const daily = dailyByAsset.get(row.asset);
+            const group = groupByRow.get(index);
+            const isGroupStart = group?.startIndex === index;
             rows.push([
-                client,
-                row.date,
-                row.time,
+                index === 0 ? client : "",
+                index === 0 ? row.date : "",
+                isGroupStart ? row.time : "",
                 row.asset,
                 direction === "Sent" ? qty : 0,
                 direction === "Received" ? qty : 0,
-                daily?.difference || 0,
-                row.allTimeDifference,
-                String(row.item.comment || ""),
-                row.item.image ? "Photo" : ""
+                isGroupStart ? group.comment : "",
+                isGroupStart ? clientReportPhotoCell({image:group.image}) : ""
             ]);
-        }
+        });
         for (const summary of exportDateSummaryRows(dateGroup.rows)) {
             rows.push([
                 summary.receivedQty ? "Received" : "",
@@ -2418,13 +2774,10 @@ function bindQuickMenu() {
                 summary.sentQty ? "Sent" : "",
                 summary.sentQty ? summary.asset : "",
                 summary.sentQty || "",
-                "",
-                "",
-                "",
                 ""
             ]);
         }
-        rows.push(new Array(10).fill(""));
+        rows.push(new Array(8).fill(""));
         return rows;
     }
 
@@ -2474,10 +2827,50 @@ function bindQuickMenu() {
             headers: {...authHeaders(), "Content-Type": "application/json"},
             body: JSON.stringify({properties: {title: `${client} Asset Movements`}})
         });
-        spreadsheetId = created.spreadsheetId;
-        let reportSheet = created.sheets?.[0] || null;
-        if (!spreadsheetId || !reportSheet?.properties?.sheetId) throw new Error("Google created the client report without returning a sheet ID.");
-        if (reportSheet.properties.title !== "Client Ledger") {
+        spreadsheetId = String(created.spreadsheetId || "").trim();
+        if (!spreadsheetId && created.spreadsheetUrl) {
+            spreadsheetId = spreadsheetIdFromLink(created.spreadsheetUrl);
+        }
+        if (!spreadsheetId) {
+            throw new Error("Google created a client report but did not return its spreadsheet ID. Check Google Drive for the new report and retry after reconnecting Sheets access.");
+        }
+
+        // The create endpoint can occasionally omit `sheets` in its response even though
+        // the spreadsheet exists. Re-read metadata by ID before declaring the export failed.
+        let metadata = created;
+        let reportSheet = (metadata.sheets || []).find(item => String(item.properties?.title || "") === "Client Ledger")
+            || (metadata.sheets || []).find(item => item?.properties?.sheetId != null)
+            || null;
+        if (!reportSheet?.properties?.sheetId) {
+            try {
+                metadata = await sheetsGet(`/${encodeURIComponent(spreadsheetId)}?includeGridData=false`);
+                reportSheet = (metadata.sheets || []).find(item => String(item.properties?.title || "") === "Client Ledger")
+                    || (metadata.sheets || []).find(item => item?.properties?.sheetId != null)
+                    || null;
+            } catch (metadataError) {
+                console.warn("Could not immediately reload new client report metadata:", metadataError);
+            }
+        }
+        if (!reportSheet?.properties?.sheetId) {
+            try {
+                const added = await sheetsPost(`/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+                    requests: [{addSheet: {properties: {title: "Client Ledger"}}}]
+                });
+                reportSheet = added.replies?.find(reply => reply.addSheet)?.addSheet || null;
+            } catch (addSheetError) {
+                console.warn("Could not add a report sheet; will retry metadata:", addSheetError);
+            }
+        }
+        if (!reportSheet?.properties?.sheetId) {
+            metadata = await sheetsGet(`/${encodeURIComponent(spreadsheetId)}?includeGridData=false`);
+            reportSheet = (metadata.sheets || []).find(item => String(item.properties?.title || "") === "Client Ledger")
+                || (metadata.sheets || []).find(item => item?.properties?.sheetId != null)
+                || null;
+        }
+        if (!reportSheet?.properties?.sheetId) {
+            throw new Error(`The client report was created (${spreadsheetId}), but Google still did not return a writable sheet ID. The file is not lost; open it in Drive and retry the export.`);
+        }
+        if (String(reportSheet.properties.title || "") !== "Client Ledger") {
             await sheetsPost(`/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {requests: [{
                 updateSheetProperties: {
                     properties: {sheetId: reportSheet.properties.sheetId, title: "Client Ledger"},
@@ -2503,7 +2896,28 @@ function bindQuickMenu() {
     async function ensureClientReportLayout(report, client, data) {
         const sheet = await getClientReportSheet(report.spreadsheetId);
         const sheetId = sheet.properties.sheetId;
-        const existing = await getValues(report.spreadsheetId, "Client Ledger");
+        let existing = await getValues(report.spreadsheetId, "Client Ledger");
+        // Migrate reports created by the old ten-column export: delete the obsolete
+        // Difference for date and All-time difference columns. This moves Comment
+        // and Picture back into columns G and H for the already-exported history too.
+        const hasLegacyDifferenceColumns = existing.some(row =>
+            String(row?.[6] || "").trim().toLowerCase() === "difference for date" &&
+            String(row?.[7] || "").trim().toLowerCase() === "all-time difference"
+        );
+        if (hasLegacyDifferenceColumns) {
+            // Old client sheets stored only the word "Photo" in the picture cell.
+            // Reconnect those cells to matching source Drive files where possible before
+            // deleting the old difference columns (which shifts Picture into column H).
+            try {
+                await backfillLegacyClientReportPhotoLinks(report.spreadsheetId, existing);
+            } catch (photoMigrationError) {
+                console.warn("Could not backfill older client report photo links:", photoMigrationError);
+            }
+            await sheetsPost(`/${encodeURIComponent(report.spreadsheetId)}:batchUpdate`, {requests: [{
+                deleteDimension: {range: {sheetId, dimension: "COLUMNS", startIndex: 6, endIndex: 8}}
+            }]});
+            existing = await getValues(report.spreadsheetId, "Client Ledger");
+        }
         const oldHistoryStart = reportHistoryStartRow(existing);
         const desiredHistoryStart = 6 + Math.max(1, data.assets.length);
         const requests = [];
@@ -2519,14 +2933,14 @@ function bindQuickMenu() {
         await sheetsPost(`/${encodeURIComponent(report.spreadsheetId)}:batchUpdate`, {requests: [{
             unmergeCells: {range: {sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 2}}
         }]});
-        const clearRange = `${quoteSheetName("Client Ledger")}!A1:J${clearEnd}`;
+        const clearRange = `${quoteSheetName("Client Ledger")}!A1:H${clearEnd}`;
         await sheetsPost(`/${encodeURIComponent(report.spreadsheetId)}/values/${encodeURIComponent(clearRange)}:clear`, {});
 
         const summaryRows = [
             [`${client} Movements`, ""],
             ["", ""],
-            [`With ${client}`, ""],
-            ["Asset Type", "Quantity"],
+            [`All-time balance with ${client}`, ""],
+            ["Asset Type", "Net Balance"],
             ...data.assets.map(item => [item.asset, item.balance])
         ];
         const summaryRange = `${quoteSheetName("Client Ledger")}!A1:B${summaryRows.length}`;
@@ -2536,18 +2950,18 @@ function bindQuickMenu() {
 
         const formatting = [
             {mergeCells: {range: {sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 2}, mergeType: "MERGE_ALL"}},
-            {repeatCell: {range: {sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 10}, cell: {userEnteredFormat: {textFormat: {bold: true, fontSize: 16}, verticalAlignment: "MIDDLE"}}, fields: "userEnteredFormat(textFormat,verticalAlignment)"}},
+            {repeatCell: {range: {sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 8}, cell: {userEnteredFormat: {textFormat: {bold: true, fontSize: 16}, verticalAlignment: "MIDDLE"}}, fields: "userEnteredFormat(textFormat,verticalAlignment)"}},
             {repeatCell: {range: {sheetId, startRowIndex: 2, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 2}, cell: {userEnteredFormat: {textFormat: {bold: true}, horizontalAlignment: "CENTER", borders: {top: {style: "SOLID"}, bottom: {style: "SOLID"}, left: {style: "SOLID"}, right: {style: "SOLID"}}}}, fields: "userEnteredFormat(textFormat,horizontalAlignment,borders)"}},
             {repeatCell: {range: {sheetId, startRowIndex: 3, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 2}, cell: {userEnteredFormat: {textFormat: {bold: true}, borders: {bottom: {style: "SOLID"}}}}, fields: "userEnteredFormat(textFormat,borders)"}},
             {repeatCell: {range: {sheetId, startRowIndex: 4, endRowIndex: 4 + data.assets.length, startColumnIndex: 0, endColumnIndex: 2}, cell: {userEnteredFormat: {borders: {bottom: {style: "SOLID"}}}}, fields: "userEnteredFormat(borders)"}},
             {repeatCell: {range: {sheetId, startRowIndex: 4, endRowIndex: 4 + data.assets.length, startColumnIndex: 1, endColumnIndex: 2}, cell: {userEnteredFormat: {numberFormat: {type: "NUMBER", pattern: "#,##0"}, horizontalAlignment: "RIGHT"}}, fields: "userEnteredFormat(numberFormat,horizontalAlignment)"}},
             {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1}, properties: {pixelSize: 150}, fields: "pixelSize"}},
-            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2}, properties: {pixelSize: 95}, fields: "pixelSize"}},
-            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 2, endIndex: 3}, properties: {pixelSize: 90}, fields: "pixelSize"}},
-            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4}, properties: {pixelSize: 175}, fields: "pixelSize"}},
-            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 8}, properties: {pixelSize: 125}, fields: "pixelSize"}},
-            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 8, endIndex: 9}, properties: {pixelSize: 220}, fields: "pixelSize"}},
-            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 9, endIndex: 11}, properties: {pixelSize: 120}, fields: "pixelSize"}}
+            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2}, properties: {pixelSize: 105}, fields: "pixelSize"}},
+            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 2, endIndex: 3}, properties: {pixelSize: 85}, fields: "pixelSize"}},
+            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4}, properties: {pixelSize: 165}, fields: "pixelSize"}},
+            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 6}, properties: {pixelSize: 115}, fields: "pixelSize"}},
+            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 6, endIndex: 7}, properties: {pixelSize: 245}, fields: "pixelSize"}},
+            {updateDimensionProperties: {range: {sheetId, dimension: "COLUMNS", startIndex: 7, endIndex: 8}, properties: {pixelSize: 135}, fields: "pixelSize"}}
         ];
         await sheetsPost(`/${encodeURIComponent(report.spreadsheetId)}:batchUpdate`, {requests: formatting});
         return {sheetId, historyStart: desiredHistoryStart};
@@ -2585,28 +2999,24 @@ function bindQuickMenu() {
             const dataEnd = dataStart + dateGroup.rows.length;
             const summaryCount = exportDateSummaryRows(dateGroup.rows).length;
             requests.push({repeatCell: {range: {sheetId, startRowIndex: dateRow, endRowIndex: dateRow + 1, startColumnIndex: 0, endColumnIndex: 2}, cell: {userEnteredFormat: {textFormat: {bold: true}}}, fields: "userEnteredFormat(textFormat)"}});
-            requests.push({repeatCell: {range: {sheetId, startRowIndex: headerRow, endRowIndex: headerRow + 1, startColumnIndex: 0, endColumnIndex: 10}, cell: {userEnteredFormat: {backgroundColor: {red: 0.13, green: 0.09, blue: 0.23}, textFormat: {bold: true, foregroundColor: {red: 1, green: 1, blue: 1}}, horizontalAlignment: "CENTER", verticalAlignment: "MIDDLE", wrapStrategy: "WRAP", borders: {top: {style: "SOLID"}, bottom: {style: "SOLID"}, left: {style: "SOLID"}, right: {style: "SOLID"}}}}, fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy,borders)"}});
+            requests.push({repeatCell: {range: {sheetId, startRowIndex: headerRow, endRowIndex: headerRow + 1, startColumnIndex: 0, endColumnIndex: 8}, cell: {userEnteredFormat: {backgroundColor: {red: 0.13, green: 0.09, blue: 0.23}, textFormat: {bold: true, foregroundColor: {red: 1, green: 1, blue: 1}}, horizontalAlignment: "CENTER", verticalAlignment: "MIDDLE", wrapStrategy: "WRAP", borders: {top: {style: "SOLID"}, bottom: {style: "SOLID"}, left: {style: "SOLID"}, right: {style: "SOLID"}}}}, fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy,borders)"}});
             if (dateGroup.rows.length) {
                 requests.push({mergeCells: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 0, endColumnIndex: 1}, mergeType: "MERGE_ALL"}});
                 requests.push({mergeCells: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 1, endColumnIndex: 2}, mergeType: "MERGE_ALL"}});
-                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 0, endColumnIndex: 10}, cell: {userEnteredFormat: {verticalAlignment: "MIDDLE", wrapStrategy: "WRAP", borders: {top: {style: "SOLID"}, bottom: {style: "SOLID"}, left: {style: "SOLID"}, right: {style: "SOLID"}}}}, fields: "userEnteredFormat(verticalAlignment,wrapStrategy,borders)"}});
-                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 4, endColumnIndex: 8}, cell: {userEnteredFormat: {numberFormat: {type: "NUMBER", pattern: "#,##0;-#,##0;0"}, horizontalAlignment: "RIGHT"}}, fields: "userEnteredFormat(numberFormat,horizontalAlignment)"}});
-                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 6, endColumnIndex: 8}, cell: {userEnteredFormat: {numberFormat: {type: "NUMBER", pattern: "+#,##0;-#,##0;0"}, horizontalAlignment: "RIGHT"}}, fields: "userEnteredFormat(numberFormat,horizontalAlignment)"}});
-                let groupStart = dataStart;
-                let previousKey = `${dateGroup.rows[0].date}\u0000${dateGroup.rows[0].time}`;
-                dateGroup.rows.forEach((row, index) => {
-                    const key = `${row.date}\u0000${row.time}`;
-                    const nextRow = dataStart + index;
-                    if (key !== previousKey) {
-                        if (nextRow - groupStart > 1) requests.push({mergeCells: {range: {sheetId, startRowIndex: groupStart, endRowIndex: nextRow, startColumnIndex: 2, endColumnIndex: 3}, mergeType: "MERGE_ALL"}});
-                        groupStart = nextRow;
-                        previousKey = key;
+                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 0, endColumnIndex: 8}, cell: {userEnteredFormat: {verticalAlignment: "MIDDLE", wrapStrategy: "WRAP", borders: {top: {style: "SOLID"}, bottom: {style: "SOLID"}, left: {style: "SOLID"}, right: {style: "SOLID"}}}}, fields: "userEnteredFormat(verticalAlignment,wrapStrategy,borders)"}});
+                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataStart, endRowIndex: dataEnd, startColumnIndex: 4, endColumnIndex: 6}, cell: {userEnteredFormat: {numberFormat: {type: "NUMBER", pattern: "#,##0"}, horizontalAlignment: "RIGHT"}}, fields: "userEnteredFormat(numberFormat,horizontalAlignment)"}});
+                // Merge time, comment and picture fields for each same-timestamp movement.
+                for (const group of ledgerTimestampGroups(dateGroup.rows)) {
+                    if (group.count <= 1) continue;
+                    const start = dataStart + group.startIndex;
+                    const end = dataStart + group.endIndex;
+                    for (const column of [2, 6, 7]) {
+                        requests.push({mergeCells: {range: {sheetId, startRowIndex:start, endRowIndex:end, startColumnIndex:column, endColumnIndex:column + 1}, mergeType:"MERGE_ALL"}});
                     }
-                });
-                if (dataEnd - groupStart > 1) requests.push({mergeCells: {range: {sheetId, startRowIndex: groupStart, endRowIndex: dataEnd, startColumnIndex: 2, endColumnIndex: 3}, mergeType: "MERGE_ALL"}});
+                }
             }
             if (summaryCount) {
-                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataEnd, endRowIndex: dataEnd + summaryCount, startColumnIndex: 0, endColumnIndex: 7}, cell: {userEnteredFormat: {textFormat: {bold: true}}}, fields: "userEnteredFormat(textFormat)"}});
+                requests.push({repeatCell: {range: {sheetId, startRowIndex: dataEnd, endRowIndex: dataEnd + summaryCount, startColumnIndex: 0, endColumnIndex: 8}, cell: {userEnteredFormat: {textFormat: {bold: true}}}, fields: "userEnteredFormat(textFormat)"}});
                 requests.push({repeatCell: {range: {sheetId, startRowIndex: dataEnd, endRowIndex: dataEnd + summaryCount, startColumnIndex: 2, endColumnIndex: 3}, cell: {userEnteredFormat: {numberFormat: {type: "NUMBER", pattern: "#,##0"}, horizontalAlignment: "RIGHT"}}, fields: "userEnteredFormat(numberFormat,horizontalAlignment)"}});
                 requests.push({repeatCell: {range: {sheetId, startRowIndex: dataEnd, endRowIndex: dataEnd + summaryCount, startColumnIndex: 6, endColumnIndex: 7}, cell: {userEnteredFormat: {numberFormat: {type: "NUMBER", pattern: "#,##0"}, horizontalAlignment: "RIGHT"}}, fields: "userEnteredFormat(numberFormat,horizontalAlignment)"}});
             }
@@ -2625,7 +3035,7 @@ function bindQuickMenu() {
         await sheetsPost(`/${encodeURIComponent(report.spreadsheetId)}:batchUpdate`, {requests: [{
             insertDimension: {range: {sheetId: layout.sheetId, dimension: "ROWS", startIndex: startRow - 1, endIndex: endRow}, inheritFromBefore: false}
         }]});
-        const valueRange = `${quoteSheetName("Client Ledger")}!A${startRow}:J${endRow}`;
+        const valueRange = `${quoteSheetName("Client Ledger")}!A${startRow}:H${endRow}`;
         await sheetsPut(`/${encodeURIComponent(report.spreadsheetId)}/values/${encodeURIComponent(valueRange)}?valueInputOption=USER_ENTERED`, {range: valueRange, majorDimension: "ROWS", values: rows});
         await sheetsPost(`/${encodeURIComponent(report.spreadsheetId)}:batchUpdate`, {requests: blockFormattingRequests(layout.sheetId, startRow, dateGroups)});
         return {...report, url: report.spreadsheetUrl, dateCount: dateGroups.length, transactionCount: data.transactions.length};
@@ -2681,32 +3091,73 @@ function bindQuickMenu() {
         return pdfJsLoadPromise;
     }
 
-    function buildClientLedgerPrintHtml(client, data, periodLabel, includePhotos) {
+    const MAX_EMBEDDED_CLIENT_LEDGER_PHOTOS = 24;
+
+    async function loadClientLedgerPhotoData(data, includePhotos) {
+        const photos = new Map();
+        if (!includePhotos) return photos;
+        // Most transaction rows in a batch share a timestamp/photo. Deduplicate before
+        // loading and cap embedded previews so large PDFs remain responsive in browsers.
+        const urls = [...new Set(ledgerTimestampGroups((data?.transactions || [])).map(group => group.image).filter(Boolean))]
+            .slice(0, MAX_EMBEDDED_CLIENT_LEDGER_PHOTOS);
+        let nextIndex = 0;
+        const workerCount = Math.min(2, urls.length);
+        const workers = Array.from({length: workerCount}, async () => {
+            while (nextIndex < urls.length) {
+                const url = urls[nextIndex++];
+                try {
+                    const loaded = await FM_MEDIA?.loadImageDataUrl?.(url, state.accessToken);
+                    if (loaded?.dataUrl) photos.set(url, await compactLedgerImageForExport(loaded, 480, 0.56));
+                } catch (error) {
+                    console.warn("Client ledger photo could not be loaded:", error);
+                }
+            }
+        });
+        await Promise.all(workers);
+        return photos;
+    }
+
+    function buildClientLedgerPrintHtml(client, data, periodLabel, includePhotos, photoData = new Map()) {
         const rowsHtml = exportDateGroups(data).map(dateGroup => {
-            const dailyByAsset = new Map(dateGroup.dailyAssets.map(item => [item.asset, item]));
-            const body = dateGroup.rows.map(row => {
-                const direction = clientLedgerDirection(row.item.movement);
-                const qty = Number(row.item.quantity) || 0;
-                const daily = dailyByAsset.get(row.asset);
-                const photo = includePhotos && row.item.image ? `<div class="photo-cell"><img src="${escapeAttr(row.item.image)}" alt="Transaction photo"></div>` : "";
-                return `<tr><td>${escapeHtml(client)}</td><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.time)}</td><td>${escapeHtml(row.asset)}</td><td>${direction === "Sent" ? formatNumber(qty) : "0"}</td><td>${direction === "Received" ? formatNumber(qty) : "0"}</td><td>${escapeHtml(formatSignedNumber(daily?.difference || 0))}</td><td>${escapeHtml(formatSignedNumber(row.allTimeDifference))}</td><td>${escapeHtml(String(row.item.comment || ""))}</td><td>${photo}</td></tr>`;
+            const body = ledgerTimestampGroups(dateGroup.rows).map(group => {
+                const first = group.rows[0];
+                const count = group.count;
+                const photoDataItem = photoData.get(group.image);
+                const photo = includePhotos && group.image
+                    ? (photoDataItem
+                        ? `<a href="${escapeAttr(group.image)}" target="_blank" rel="noopener" class="photo-cell"><img loading="lazy" decoding="async" src="${escapeAttr(photoDataItem.dataUrl)}" alt="Transaction photo"></a>`
+                        : `<a href="${escapeAttr(group.image)}" target="_blank" rel="noopener">Open photo</a>`)
+                    : "";
+                return group.rows.map((row, rowIndex) => {
+                    const direction = clientLedgerDirection(row.item.movement);
+                    const qty = Number(row.item.quantity) || 0;
+                    const merged = rowIndex === 0
+                        ? `<td rowspan="${count}">${escapeHtml(client)}</td><td rowspan="${count}">${escapeHtml(row.date)}</td><td rowspan="${count}">${escapeHtml(row.time)}</td>`
+                        : "";
+                    const shared = rowIndex === 0
+                        ? `<td rowspan="${count}">${escapeHtml(group.comment).replace(/\n/g, "<br>")}</td><td rowspan="${count}">${photo}</td>`
+                        : "";
+                    return `<tr>${merged}<td>${escapeHtml(row.asset)}</td><td>${direction === "Sent" ? formatNumber(qty) : "0"}</td><td>${direction === "Received" ? formatNumber(qty) : "0"}</td>${shared}</tr>`;
+                }).join("");
             }).join("");
             const summaries = exportDateSummaryRows(dateGroup.rows);
             const received = summaries.filter(item => item.receivedQty).map(item => `<tr><td>${escapeHtml(item.asset)}</td><td>${formatNumber(item.receivedQty)}</td></tr>`).join("");
             const sent = summaries.filter(item => item.sentQty).map(item => `<tr><td>${escapeHtml(item.asset)}</td><td>${formatNumber(item.sentQty)}</td></tr>`).join("");
-            return `<section class="date-block"><div class="date-title">Date: ${escapeHtml(dateGroup.date)}</div><table class="ledger"><thead><tr>${ledgerMainHeaders().map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table><div class="summary-row"><table><thead><tr><th>Received</th><th>Quantity</th></tr></thead><tbody>${received || '<tr><td colspan="2">0</td></tr>'}</tbody></table><table><thead><tr><th>Sent</th><th>Quantity</th></tr></thead><tbody>${sent || '<tr><td colspan="2">0</td></tr>'}</tbody></table></div></section>`;
+            return `<section class="date-block"><div class="date-title">Date: ${escapeHtml(dateGroup.date)}</div><table class="ledger"><thead><tr>${ledgerMainHeaders().map(h => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table><div class="summary-row"><table><thead><tr><th>Received on ${escapeHtml(dateGroup.date)}</th><th>Quantity</th></tr></thead><tbody>${received || '<tr><td colspan="2">0</td></tr>'}</tbody></table><table><thead><tr><th>Sent on ${escapeHtml(dateGroup.date)}</th><th>Quantity</th></tr></thead><tbody>${sent || '<tr><td colspan="2">0</td></tr>'}</tbody></table></div></section>`;
         }).join("");
         const assetRows = data.assets.map(item => `<tr><td>${escapeHtml(item.asset)}</td><td>${formatNumber(item.balance)}</td></tr>`).join("");
         return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(client)} Movements</title><style>
-@page{size:A4 landscape;margin:9mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;font-size:9px;margin:0}.title{font-size:19px;font-weight:700;margin:0 0 4px}.period{font-size:10px;margin-bottom:9px}.asset-summary{width:52mm;border-collapse:collapse;margin-bottom:9px}.asset-summary th,.asset-summary td,.ledger th,.ledger td,.summary-row th,.summary-row td{border:1px solid #777;padding:2px 3px}.asset-summary th,.ledger th,.summary-row th{background:#211b32;color:#fff;font-weight:700}.asset-summary td:last-child,.ledger td:nth-child(5),.ledger td:nth-child(6),.ledger td:nth-child(7),.ledger td:nth-child(8){text-align:right}.ledger{width:100%;border-collapse:collapse;table-layout:fixed}.ledger th,.ledger td{font-size:7px;vertical-align:middle;word-break:break-word}.ledger th:nth-child(1){width:11%}.ledger th:nth-child(2){width:7%}.ledger th:nth-child(3){width:6%}.ledger th:nth-child(4){width:11%}.ledger th:nth-child(5){width:7%}.ledger th:nth-child(6){width:8%}.ledger th:nth-child(7){width:8%}.ledger th:nth-child(8){width:9%}.ledger th:nth-child(9){width:15%}.ledger th:nth-child(10){width:8%}.date-block{break-inside:avoid;margin-top:7px}.date-title{font-size:11px;font-weight:700;margin-bottom:3px}.summary-row{display:flex;gap:10px;margin-top:4px;break-inside:avoid}.summary-row table{width:55mm;border-collapse:collapse}.summary-row th,.summary-row td{font-size:8px}.photo-cell img{max-width:28mm;max-height:16mm;display:block;margin:auto}@media print{.no-print{display:none}}
-</style></head><body><div class="title">${escapeHtml(client)} Movements</div><div class="period">Period: ${escapeHtml(periodLabel)}</div><table class="asset-summary"><thead><tr><th>Asset Type</th><th>Quantity</th></tr></thead><tbody>${assetRows}</tbody></table>${rowsHtml}</body></html>`;
+@page{size:A4 landscape;margin:9mm}*{box-sizing:border-box}body{font-family:Arial,sans-serif;color:#111;font-size:9px;margin:0}.title{font-size:19px;font-weight:700;margin:0 0 4px}.period{font-size:10px;margin-bottom:9px}.balance-title{font-size:11px;font-weight:700;margin:4px 0 3px}.asset-summary{width:65mm;border-collapse:collapse;margin-bottom:9px}.asset-summary th,.asset-summary td,.ledger th,.ledger td,.summary-row th,.summary-row td{border:1px solid #777;padding:2px 3px}.asset-summary th,.ledger th,.summary-row th{background:#211b32;color:#fff;font-weight:700}.asset-summary td:last-child,.ledger td:nth-child(5),.ledger td:nth-child(6){text-align:right}.ledger{width:100%;border-collapse:collapse;table-layout:fixed}.ledger th,.ledger td{font-size:7px;vertical-align:middle;word-break:break-word}.ledger th:nth-child(1){width:10%}.ledger th:nth-child(2){width:8%}.ledger th:nth-child(3){width:6%}.ledger th:nth-child(4){width:12%}.ledger th:nth-child(5){width:8%}.ledger th:nth-child(6){width:9%}.ledger th:nth-child(7){width:34%}.ledger th:nth-child(8){width:13%}.date-block{margin-top:7px}.date-title{font-size:11px;font-weight:700;margin-bottom:3px}.summary-row{display:flex;gap:10px;margin-top:4px;break-inside:avoid}.summary-row table{width:62mm;border-collapse:collapse}.summary-row th,.summary-row td{font-size:8px}.photo-cell img{max-width:22mm;max-height:12mm;display:block;margin:auto}@media print{.no-print{display:none}}
+</style></head><body><div class="title">${escapeHtml(client)} Movements</div><div class="period">Period: ${escapeHtml(periodLabel)}</div><div class="balance-title">All-time balance with ${escapeHtml(client)}</div><table class="asset-summary"><thead><tr><th>Asset Type</th><th>Net Balance</th></tr></thead><tbody>${assetRows}</tbody></table>${rowsHtml}</body></html>`;
     }
 
     async function printClientLedgerPdfFallback(client, data, periodLabel, includePhotos) {
-        const printWindow = window.open("", "_blank", "noopener,noreferrer,width=1200,height=900");
+        const printWindow = window.open("", "_blank", "width=1200,height=900");
         if (!printWindow) throw new Error("The PDF library could not be loaded and the browser blocked the print window. Please allow pop-ups for this site and try again.");
+        printWindow.opener = null;
+        const photoData = await loadClientLedgerPhotoData(data, includePhotos);
         printWindow.document.open();
-        printWindow.document.write(buildClientLedgerPrintHtml(client, data, periodLabel, includePhotos));
+        printWindow.document.write(buildClientLedgerPrintHtml(client, data, periodLabel, includePhotos, photoData));
         printWindow.document.close();
         await new Promise(resolve => {
             const waitForImages = () => {
@@ -2727,47 +3178,147 @@ function bindQuickMenu() {
 
     async function buildClientLedgerPdf(client, data, periodLabel, includePhotos) {
         const jsPDF = await ensurePdfJs();
-        const doc = new jsPDF({orientation: "landscape", unit: "mm", format: "a4"});
+        const doc = new jsPDF({orientation:"landscape", unit:"mm", format:"a4", compress:true, precision:2});
         const margin = 9;
+        const photoData = await loadClientLedgerPhotoData(data, includePhotos);
         doc.setFontSize(16); doc.setFont(undefined, "bold"); doc.text(`${client} Movements`, margin, 12);
         doc.setFontSize(8); doc.setFont(undefined, "normal"); doc.text(`Period: ${periodLabel}`, margin, 18);
-        doc.autoTable({startY: 22, head: [["Asset Type","Quantity"]], body: data.assets.map(item => [item.asset, formatNumber(item.balance)]), theme: "grid", styles: {fontSize: 8, cellPadding: 2}, headStyles: {fillColor: [33,27,50], textColor: 255}});
-        let y = doc.lastAutoTable.finalY + 6;
+        if (includePhotos) {
+            const photoCount = new Set(ledgerTimestampGroups(data.transactions).map(group => group.image).filter(Boolean)).size;
+            doc.setFontSize(6.5); doc.text(`Photos: compact previews for ${Math.min(photoCount, MAX_EMBEDDED_CLIENT_LEDGER_PHOTOS)} of ${photoCount} unique movements; other photo cells remain clickable links.`, margin, 22);
+        }
+        doc.setFontSize(10); doc.setFont(undefined, "bold"); doc.text(`All-time balance with ${client}`, margin, 27);
+        doc.autoTable({startY:30, head:[["Asset Type","Net Balance"]], body:data.assets.map(item=>[item.asset,formatNumber(item.balance)]), theme:"grid", styles:{fontSize:8,cellPadding:1.6}, headStyles:{fillColor:[33,27,50],textColor:255}, columnStyles:{0:{cellWidth:46},1:{cellWidth:27,halign:"right"}}});
+        let y = doc.lastAutoTable.finalY + 5;
         for (const dateGroup of exportDateGroups(data)) {
             if (y > 180) { doc.addPage(); y = 12; }
             doc.setFontSize(10); doc.setFont(undefined, "bold"); doc.text(`Date: ${dateGroup.date}`, margin, y); doc.setFont(undefined, "normal");
-            const dailyByAsset = new Map(dateGroup.dailyAssets.map(item => [item.asset, item]));
-            const body = dateGroup.rows.map(row => {
-                const direction = clientLedgerDirection(row.item.movement), qty = Number(row.item.quantity) || 0, daily = dailyByAsset.get(row.asset);
-                return [
-                    client, row.date, row.time, row.asset,
-                    direction === "Sent" ? formatNumber(qty) : "0",
-                    direction === "Received" ? formatNumber(qty) : "0",
-                    formatSignedNumber(daily?.difference || 0),
-                    formatSignedNumber(row.allTimeDifference),
-                    String(row.item.comment || ""),
-                    includePhotos && row.item.image ? "Open photo" : ""
-                ];
-            });
+            const body = [];
+            const photoByBodyRow = new Map();
+            for (const group of ledgerTimestampGroups(dateGroup.rows)) {
+                const first = group.rows[0];
+                const firstBodyRow = body.length;
+                const photo = photoData.get(group.image);
+                const canEmbed = Boolean(includePhotos && group.image && photo?.dataUrl && ["jpeg", "png"].includes(String(photo.extension || "").toLowerCase()));
+                const span = value => group.count > 1 ? {content:value, rowSpan:group.count, styles:{valign:"middle"}} : value;
+                const firstQty = Number(first.item.quantity) || 0;
+                const firstDirection = clientLedgerDirection(first.item.movement);
+                body.push([
+                    span(client), span(first.date), span(first.time), first.asset,
+                    firstDirection === "Sent" ? formatNumber(firstQty) : "0",
+                    firstDirection === "Received" ? formatNumber(firstQty) : "0",
+                    span(group.comment),
+                    span(includePhotos && group.image ? (canEmbed ? "" : "Open photo") : "")
+                ]);
+                if (includePhotos && group.image) photoByBodyRow.set(firstBodyRow, {url:group.image, image:photo, canEmbed});
+                for (let index = 1; index < group.rows.length; index += 1) {
+                    const row = group.rows[index];
+                    const direction = clientLedgerDirection(row.item.movement);
+                    const qty = Number(row.item.quantity) || 0;
+                    // AutoTable supports ragged rows when earlier cells use rowSpan.
+                    body.push([row.asset, direction === "Sent" ? formatNumber(qty) : "0", direction === "Received" ? formatNumber(qty) : "0"]);
+                }
+            }
             doc.autoTable({
-                startY: y + 3,
-                head: [ledgerMainHeaders()],
-                body,
-                theme: "grid",
-                margin: {left: margin, right: margin},
-                styles: {fontSize: 5.7, cellPadding: 1.2, overflow: "linebreak", valign: "middle"},
-                headStyles: {fillColor: [33,27,50], textColor: 255, fontSize: 5.7},
-                columnStyles: {0:{cellWidth:27},1:{cellWidth:20},2:{cellWidth:16},3:{cellWidth:29},4:{cellWidth:16},5:{cellWidth:18},6:{cellWidth:17},7:{cellWidth:18},8:{cellWidth:38},9:{cellWidth:17}}
+                startY:y + 3,
+                head:[ledgerMainHeaders()], body,
+                theme:"grid", margin:{left:margin,right:margin}, rowPageBreak:"avoid",
+                styles:{fontSize:6.1,cellPadding:1.0,overflow:"linebreak",valign:"middle",minCellHeight:5},
+                headStyles:{fillColor:[33,27,50],textColor:255,fontSize:6.0},
+                columnStyles:{0:{cellWidth:23},1:{cellWidth:22},2:{cellWidth:16},3:{cellWidth:32},4:{cellWidth:18,halign:"right"},5:{cellWidth:20,halign:"right"},6:{cellWidth:104},7:{cellWidth:27,halign:"center"}},
+                didParseCell: hook => {
+                    if (hook.section === "body" && hook.column.index === 7 && photoByBodyRow.has(hook.row.index)) hook.cell.styles.minCellHeight = 14;
+                },
+                didDrawCell: hook => {
+                    if (hook.section !== "body" || hook.column.index !== 7 || !includePhotos) return;
+                    const photoEntry = photoByBodyRow.get(hook.row.index);
+                    if (!photoEntry) return;
+                    if (photoEntry.canEmbed && photoEntry.image?.dataUrl) {
+                        try {
+                            const format = String(photoEntry.image.extension).toLowerCase() === "png" ? "PNG" : "JPEG";
+                            const imageWidth = Math.min(19, hook.cell.width - 2);
+                            const imageHeight = Math.min(11, hook.cell.height - 2);
+                            doc.addImage(photoEntry.image.dataUrl, format, hook.cell.x + (hook.cell.width - imageWidth) / 2, hook.cell.y + (hook.cell.height - imageHeight) / 2, imageWidth, imageHeight, undefined, "FAST");
+                        } catch (error) {
+                            console.warn("Could not embed a compact client-ledger photo in the PDF:", error);
+                        }
+                    }
+                    doc.link(hook.cell.x, hook.cell.y, hook.cell.width, hook.cell.height, {url:photoEntry.url});
+                }
             });
             y = doc.lastAutoTable.finalY + 3;
             const summaries = exportDateSummaryRows(dateGroup.rows);
             if (y > 184) { doc.addPage(); y = 12; }
-            const receivedBody = summaries.filter(item => item.receivedQty).map(item => [item.asset, formatNumber(item.receivedQty)]);
-            const sentBody = summaries.filter(item => item.sentQty).map(item => [item.asset, formatNumber(item.sentQty)]);
-            doc.autoTable({startY: y, margin: {left: margin, right: 210}, tableWidth: 55, head: [["Received","Quantity"]], body: receivedBody, theme: "grid", styles: {fontSize: 7, cellPadding: 1.3}, headStyles: {fillColor: [33,27,50], textColor: 255}});
-            doc.autoTable({startY: y, margin: {left: 156, right: margin}, tableWidth: 55, head: [["Sent","Quantity"]], body: sentBody, theme: "grid", styles: {fontSize: 7, cellPadding: 1.3}, headStyles: {fillColor: [33,27,50], textColor: 255}});
-            y = Math.max(doc.lastAutoTable.finalY, y + 11) + 5;
+            const receivedBody = summaries.filter(item=>item.receivedQty).map(item=>[item.asset,formatNumber(item.receivedQty)]);
+            const sentBody = summaries.filter(item=>item.sentQty).map(item=>[item.asset,formatNumber(item.sentQty)]);
+            doc.autoTable({startY:y,margin:{left:margin,right:210},tableWidth:62,head:[[`Received on ${dateGroup.date}`,"Quantity"]],body:receivedBody,theme:"grid",styles:{fontSize:7,cellPadding:1.1},headStyles:{fillColor:[33,27,50],textColor:255}});
+            const receivedFinalY = doc.lastAutoTable.finalY;
+            doc.autoTable({startY:y,margin:{left:156,right:margin},tableWidth:62,head:[[`Sent on ${dateGroup.date}`,"Quantity"]],body:sentBody,theme:"grid",styles:{fontSize:7,cellPadding:1.1},headStyles:{fillColor:[33,27,50],textColor:255}});
+            const sentFinalY = doc.lastAutoTable.finalY;
+            y = Math.max(receivedFinalY,sentFinalY,y+11) + 5;
         }
+        return doc;
+    }
+
+    async function buildClientWeeklySummaryPdf(client, data, weekRange) {
+        const jsPDF = await ensurePdfJs();
+        const doc = new jsPDF({orientation:"landscape", unit:"mm", format:"a4", compress:true, precision:2});
+        const margin = 12;
+        const daily = new Map();
+        for (const row of (data?.dailyRows || [])) {
+            const key = `${row.date}\u0000${row.asset}`;
+            daily.set(key, {date:row.date,asset:row.asset,sent:Number(row.sent)||0,received:Number(row.received)||0,net:(Number(row.sent)||0)-(Number(row.received)||0)});
+        }
+        const assets = [...new Set([...(data.assets || []).map(item=>item.asset), ...[...daily.values()].map(row=>row.asset)])].sort((a,b)=>a.localeCompare(b));
+        const dates = [];
+        for (let time = Date.parse(`${weekRange.from}T00:00:00Z`); time <= Date.parse(`${weekRange.to}T00:00:00Z`); time += 86400000) dates.push(new Date(time).toISOString().slice(0,10));
+
+        // Keep the weekly daily-summary table truly daily: exactly one row for each day,
+        // with that day's per-asset figures listed compactly inside the Sent/Received/Net cells.
+        const dailyBody = dates.map(date => {
+            const dayRows = assets
+                .map(asset => daily.get(`${date}\u0000${asset}`) || {date,asset,sent:0,received:0,net:0})
+                .filter(row => row.sent || row.received);
+            if (!dayRows.length) return [date, "No movements", "—", "—"];
+            const sent = dayRows.filter(row=>row.sent).map(row=>`${row.asset}: ${formatNumber(row.sent)}`).join("\n");
+            const received = dayRows.filter(row=>row.received).map(row=>`${row.asset}: ${formatNumber(row.received)}`).join("\n");
+            const net = dayRows.filter(row=>row.net).map(row=>`${row.asset}: ${row.net > 0 ? "+" : "-"}${formatNumber(Math.abs(row.net))}`).join("\n");
+            return [date, sent || "—", received || "—", net || "—"];
+        });
+
+        const weeklyByAsset = new Map(assets.map(asset=>[asset,{asset,sent:0,received:0,net:0}]));
+        for (const row of daily.values()) {
+            if (row.date < weekRange.from || row.date > weekRange.to) continue;
+            const target = weeklyByAsset.get(row.asset);
+            if (!target) continue;
+            target.sent += row.sent; target.received += row.received; target.net += row.net;
+        }
+        const weeklyBody = [...weeklyByAsset.values()]
+            .filter(row=>row.sent || row.received)
+            .map(row=>[row.asset,formatNumber(row.sent),formatNumber(row.received),`${row.net > 0 ? "+" : row.net < 0 ? "-" : ""}${formatNumber(Math.abs(row.net))}`]);
+        const summaryRows = [
+            ["Period",`${weekRange.from} to ${weekRange.to}`],
+            ["Report format","One row per day with asset breakdowns; individual transactions are not included."]
+        ];
+        doc.setFontSize(17); doc.setFont(undefined,"bold"); doc.text(`${client} — Weekly Movement Report`,margin,15);
+        doc.setFontSize(9); doc.setFont(undefined,"normal"); doc.text(`Week ${weekRange.value} · ${weekRange.from} to ${weekRange.to}`,margin,22);
+        doc.autoTable({startY:26,head:[["Report detail","Value"]],body:summaryRows,theme:"grid",styles:{fontSize:8,cellPadding:1.8},headStyles:{fillColor:[33,27,50],textColor:255},columnStyles:{0:{cellWidth:42},1:{cellWidth:150}}});
+        let y = doc.lastAutoTable.finalY + 6;
+        doc.setFontSize(11); doc.setFont(undefined,"bold"); doc.text("Daily totals — one row per day",margin,y);
+        doc.autoTable({
+            startY:y+2,
+            head:[["Date","Quantity sent by asset","Quantity received by asset","Net movement by asset"]],
+            body:dailyBody.length?dailyBody:[["—","No transactions","—","—"]],
+            theme:"grid",
+            styles:{fontSize:7.2,cellPadding:1.8,overflow:"linebreak",valign:"middle",minCellHeight:8},
+            headStyles:{fillColor:[33,27,50],textColor:255},
+            columnStyles:{0:{cellWidth:30},1:{cellWidth:75},2:{cellWidth:75},3:{cellWidth:75}},
+            rowPageBreak:"avoid"
+        });
+        y = doc.lastAutoTable.finalY + 8;
+        if (y > 175) { doc.addPage(); y = 16; }
+        doc.setFontSize(11); doc.setFont(undefined,"bold"); doc.text("Totals for the week",margin,y);
+        doc.autoTable({startY:y+2,head:[["Asset type","Quantity sent","Quantity received","Net movement"]],body:weeklyBody.length?weeklyBody:[["No movements","0","0","0"]],theme:"grid",styles:{fontSize:8,cellPadding:1.8},headStyles:{fillColor:[33,27,50],textColor:255},columnStyles:{0:{cellWidth:82},1:{cellWidth:35,halign:"right"},2:{cellWidth:38,halign:"right"},3:{cellWidth:35,halign:"right"}}});
         return doc;
     }
 
@@ -2780,12 +3331,15 @@ function bindQuickMenu() {
         const status = $("client-ledger-export-status"), button = $("run-client-ledger-export");
         if (fromKey && toKey && fromKey > toKey) { if(status){status.textContent="From date must be on or before To date.";status.classList.add("error");} return; }
         if (!assets.length) { if(status){status.textContent="No asset types are available for this client.";status.classList.add("error");} return; }
-        const data = makeClientLedgerData(client, getDashboardTransactions(), fromKey, toKey, assets);
+        let data = makeClientLedgerData(client, getDashboardTransactions(), fromKey, toKey, assets);
         if (!data.transactions.length) { if(status){status.textContent="No client transactions match that period and asset selection.";status.classList.add("error");} return; }
-        const periodLabel = fromKey || toKey ? `${fromKey || "start"} → ${toKey || "today"}` : "All available history";
+        const periodLabel = fromKey || toKey ? `${fromKey || "start"} to ${toKey || "today"}` : "All available history";
+        let photoArchive = {copied:0,archived:0,warning:""};
         try {
             if(button){button.disabled=true;button.textContent="Saving…";}
-            if(status){status.textContent="Saving the selected transactions to the client Google Sheet…";status.classList.remove("error");}
+            if(status){status.textContent=includePhotos ? "Copying photos into client-specific MOVEMENTS folders in Drive and preparing the report…" : "Saving the selected transactions to the client Google Sheet…";status.classList.remove("error");}
+            photoArchive = await archiveClientLedgerPhotosForExport(data, includePhotos);
+            data = photoArchive.data;
             const report = await ensureClientReportSpreadsheet(client);
             await writeClientReportExport(report, client, data);
             const wb = await buildClientLedgerWorkbook(client, data, periodLabel, includePhotos);
@@ -2795,7 +3349,7 @@ function bindQuickMenu() {
             const datePart = toKey || fromKey || transactionDateKey(new Date());
             const a=document.createElement("a"); a.href=url; a.download=`${safeClient}-client-ledger-${datePart}.xlsx`; document.body.appendChild(a); a.click(); a.remove();
             setTimeout(()=>URL.revokeObjectURL(url),3000);
-            if(status)status.innerHTML=`Saved to the client sheet. <a href="${escapeAttr(report.url)}" target="_blank" rel="noopener">Open client report</a>. XLSX copy downloaded.`;
+            if(status)status.innerHTML=`Saved to the client sheet. <a href="${escapeAttr(report.url)}" target="_blank" rel="noopener">Open client report</a>. XLSX copy downloaded.${photoArchive.archived ? ` Filed ${photoArchive.archived} photo copy/copies in the <a href="${escapeAttr(photoArchive.folderUrl)}" target="_blank" rel="noopener">client movement photo archive</a>, inside each client's MOVEMENTS folder.` : ""}${photoArchive.warning ? ` ${escapeHtml(photoArchive.warning)}` : ""}`;
         } catch(error) {
             console.error("Client ledger export failed:",error);
             if(status){status.textContent=error?.message||"The client report could not be saved.";status.classList.add("error");}
@@ -2810,17 +3364,20 @@ function bindQuickMenu() {
         const includePhotos = Boolean($("client-ledger-export-photos")?.checked);
         const status = $("client-ledger-export-status"), button = $("run-client-ledger-pdf");
         if (fromKey && toKey && fromKey > toKey) { if(status){status.textContent="From date must be on or before To date.";status.classList.add("error");} return; }
-        const data = makeClientLedgerData(client, getDashboardTransactions(), fromKey, toKey, assets);
+        let data = makeClientLedgerData(client, getDashboardTransactions(), fromKey, toKey, assets);
         if (!data.transactions.length) { if(status){status.textContent="No client transactions match that period and asset selection.";status.classList.add("error");} return; }
-        const periodLabel = fromKey || toKey ? `${fromKey || "start"} → ${toKey || "today"}` : "All available history";
+        const periodLabel = fromKey || toKey ? `${fromKey || "start"} to ${toKey || "today"}` : "All available history";
+        let photoArchive = {copied:0,archived:0,warning:""};
         try {
             if(button){button.disabled=true;button.textContent="Building PDF…";}
-            if(status){status.textContent="Building the PDF…";status.classList.remove("error");}
+            if(status){status.textContent=includePhotos ? "Copying photos into client-specific MOVEMENTS folders in Drive and building a compact PDF…" : "Building the PDF…";status.classList.remove("error");}
+            photoArchive = await archiveClientLedgerPhotosForExport(data, includePhotos);
+            data = photoArchive.data;
             const doc = await buildClientLedgerPdf(client,data,periodLabel,includePhotos);
             const safeClient = client.replace(/[^a-z0-9]+/gi,"-").replace(/^-+|-+$/g,"").toLowerCase() || "client";
             const datePart = toKey || fromKey || transactionDateKey(new Date());
             doc.save(`${safeClient}-client-ledger-${datePart}.pdf`);
-            if(status)status.textContent="PDF exported.";
+            if(status)status.innerHTML=`PDF exported.${photoArchive.archived ? ` Filed ${photoArchive.archived} photo copy/copies in the <a href="${escapeAttr(photoArchive.folderUrl)}" target="_blank" rel="noopener">client movement photo archive</a>, inside each client's MOVEMENTS folder.` : ""}${photoArchive.warning ? ` ${escapeHtml(photoArchive.warning)}` : ""}`;
         } catch(error) {
             console.error("Client ledger PDF export failed:",error);
             if (/^PDF library failed to load\./i.test(error?.message || "")) {
@@ -2835,6 +3392,40 @@ function bindQuickMenu() {
         } finally { if(button){button.disabled=false;button.textContent="Export PDF";} }
     }
 
+    async function runClientLedgerWeeklyPdfExport() {
+        const client = $("client-details-title")?.textContent?.trim() || "Unknown client";
+        const weekValue = $("client-ledger-export-week")?.value || "";
+        const assets = selectedClientExportAssets();
+        const status = $("client-ledger-export-status"), button = $("run-client-ledger-week-pdf");
+        const weekRange = isoWeekDateRange(weekValue);
+        if (!weekRange) {
+            if (status) { status.textContent = "Choose a valid week before exporting the weekly report."; status.classList.add("error"); }
+            return;
+        }
+        if (!assets.length) {
+            if (status) { status.textContent = "Select at least one asset type for the weekly report."; status.classList.add("error"); }
+            return;
+        }
+        const data = makeClientLedgerData(client, getDashboardTransactions(), weekRange.from, weekRange.to, assets);
+        if (!data.transactions.length) {
+            if (status) { status.textContent = `No ${client} movements were found for ${weekRange.from} to ${weekRange.to}.`; status.classList.add("error"); }
+            return;
+        }
+        try {
+            if (button) { button.disabled = true; button.textContent = "Building…"; }
+            if (status) { status.textContent = "Building a lightweight weekly totals report…"; status.classList.remove("error"); }
+            const doc = await buildClientWeeklySummaryPdf(client, data, weekRange);
+            const safeClient = client.replace(/[^a-z0-9]+/gi,"-").replace(/^-+|-+$/g,"").toLowerCase() || "client";
+            doc.save(`${safeClient}-weekly-movement-report-${weekRange.value}.pdf`);
+            if (status) status.textContent = `Weekly PDF exported for ${weekRange.from} to ${weekRange.to}. It contains daily totals and a final weekly total, not individual transactions.`;
+        } catch (error) {
+            console.error("Client weekly PDF export failed:", error);
+            if (status) { status.textContent = error?.message || "The weekly PDF could not be generated."; status.classList.add("error"); }
+        } finally {
+            if (button) { button.disabled = false; button.textContent = "Export Weekly PDF"; }
+        }
+    }
+
     async function buildClientLedgerWorkbook(client, data, periodLabel, includePhotos) {
         const ExcelJS = await ensureExcelJS();
         const wb = new ExcelJS.Workbook();
@@ -2842,50 +3433,53 @@ function bindQuickMenu() {
         const ledger = wb.addWorksheet("Client Ledger", {views:[{state:"frozen",ySplit:1,showGridLines:false}]});
         ledger.columns = [
             {header:"Client",key:"client",width:18},{header:"Date",key:"date",width:13},{header:"Time",key:"time",width:11},{header:"Asset type",key:"asset",width:22},
-            {header:"Quantity sent",key:"sent",width:15},{header:"Quantity received",key:"received",width:19},{header:"Difference for date",key:"difference",width:18},{header:"All-time difference",key:"allTimeDifference",width:19},
-            {header:"Comment",key:"comment",width:30},{header:"Picture",key:"picture",width:14}
+            {header:"Quantity sent",key:"sent",width:15},{header:"Quantity received",key:"received",width:19},{header:"Comment",key:"comment",width:34},{header:"Picture",key:"picture",width:18}
         ];
-        ledger.mergeCells("A1:J1"); ledger.getCell("A1").value = `${client} Movements`; ledger.getCell("A1").font = {bold:true,size:16};
-        ledger.mergeCells("A3:B3"); ledger.getCell("A3").value = `With ${client}`; ledger.getCell("A3").font = {bold:true}; ledger.getCell("A3").alignment = {horizontal:"center"};
-        ledger.getRow(4).values = ["Asset Type","Quantity"]; styleWorksheetHeader(ledger.getRow(4));
+        ledger.mergeCells("A1:H1"); ledger.getCell("A1").value = `${client} Movements`; ledger.getCell("A1").font = {bold:true,size:16};
+        ledger.mergeCells("A3:B3"); ledger.getCell("A3").value = `All-time balance with ${client}`; ledger.getCell("A3").font = {bold:true}; ledger.getCell("A3").alignment = {horizontal:"center"};
+        ledger.getRow(4).values = ["Asset Type","Net Balance"]; styleWorksheetHeader(ledger.getRow(4));
         data.assets.forEach(item=>{const r=ledger.addRow([item.asset,item.balance]);r.getCell(2).numFmt="#,##0";});
         let rowCursor = 6 + data.assets.length;
+        const firstHistoryHeader = rowCursor + 1;
+        const photoImageIds = new Map();
         for(const dateGroup of exportDateGroups(data)){
-            ledger.getCell(`A${rowCursor}`).value="Date "; ledger.getCell(`B${rowCursor}`).value=dateGroup.date; ledger.getCell(`A${rowCursor}`).font={bold:true}; ledger.getCell(`B${rowCursor}`).font={bold:true};
+            ledger.getCell(`A${rowCursor}`).value="Date"; ledger.getCell(`B${rowCursor}`).value=dateGroup.date; ledger.getCell(`A${rowCursor}`).font={bold:true}; ledger.getCell(`B${rowCursor}`).font={bold:true};
             const headerRow=ledger.getRow(rowCursor+1); headerRow.values=ledgerMainHeaders(); styleWorksheetHeader(headerRow);
-            const dataStart=headerRow.number+1; const dailyByAsset=new Map(dateGroup.dailyAssets.map(item=>[item.asset,item]));
-            for(const row of dateGroup.rows){
-                const direction=clientLedgerDirection(row.item.movement),qty=Number(row.item.quantity)||0,daily=dailyByAsset.get(row.asset);
-                const r=ledger.addRow([client,row.date,row.time,row.asset,direction==="Sent"?qty:0,direction==="Received"?qty:0,daily?.difference||0,row.allTimeDifference,String(row.item.comment||""),row.item.image?"Photo":""]);
-                r.height=28;r.alignment={vertical:"middle",wrapText:true}; for(let c=1;c<=10;c++)applyLedgerCellBorders(r.getCell(c)); [5,6].forEach(c=>r.getCell(c).numFmt="#,##0"); [7,8].forEach(c=>r.getCell(c).numFmt="+#,##0;-#,##0;0");
-                if(row.item.image){r.getCell(10).value={text:"Open photo",hyperlink:row.item.image};r.getCell(10).font={color:{argb:"FF6D5AA8"},underline:true};}
-                if(includePhotos && row.item.image) await addLedgerPhoto(wb,ledger,r.number,10,row.item,true);
+            const dataStart=headerRow.number+1;
+            const timestampGroups=ledgerTimestampGroups(dateGroup.rows);
+            const timestampGroupByRow=new Map();
+            timestampGroups.forEach(group=>{for(let i=group.startIndex;i<group.endIndex;i+=1)timestampGroupByRow.set(i,group);});
+            for (let index=0; index<dateGroup.rows.length; index+=1) {
+                const row=dateGroup.rows[index];
+                const group=timestampGroupByRow.get(index),isGroupStart=group?.startIndex===index;
+                const direction=clientLedgerDirection(row.item.movement),qty=Number(row.item.quantity)||0;
+                const photoUrl=isGroupStart?group.image:"";
+                const photoCell=photoUrl?{text:"Open photo",hyperlink:photoUrl}:"";
+                const r=ledger.addRow([index===0?client:"",index===0?row.date:"",isGroupStart?row.time:"",row.asset,direction==="Sent"?qty:0,direction==="Received"?qty:0,isGroupStart?group.comment:"",photoCell]);
+                r.height=isGroupStart && photoUrl?44:26;r.alignment={vertical:"middle",wrapText:true}; for(let c=1;c<=8;c++)applyLedgerCellBorders(r.getCell(c)); [5,6].forEach(c=>r.getCell(c).numFmt="#,##0");
+                if(photoUrl){r.getCell(8).font={color:{argb:"FF6D5AA8"},underline:true};}
+                if(includePhotos && photoUrl) await addLedgerPhoto(wb,ledger,r.number,8,{image:photoUrl},true,photoImageIds);
             }
             const dataEnd=ledger.rowCount;
             if(dateGroup.rows.length){
                 ledger.mergeCells(`A${dataStart}:A${dataEnd}`); ledger.mergeCells(`B${dataStart}:B${dataEnd}`);
-                let groupStart=dataStart,previousKey=`${dateGroup.rows[0].date}\u0000${dateGroup.rows[0].time}`;
-                dateGroup.rows.forEach((row,index)=>{const key=`${row.date}\u0000${row.time}`,rowNumber=dataStart+index;if(key!==previousKey){if(rowNumber-groupStart>1)ledger.mergeCells(`C${groupStart}:C${rowNumber-1}`);groupStart=rowNumber;previousKey=key;}});
-                if(dataEnd-groupStart>1)ledger.mergeCells(`C${groupStart}:C${dataEnd}`);
+                for(const group of timestampGroups){
+                    if(group.count<=1)continue;
+                    const firstRow=dataStart+group.startIndex,lastRow=dataStart+group.endIndex-1;
+                    for(const column of ["C","G","H"])ledger.mergeCells(`${column}${firstRow}:${column}${lastRow}`);
+                }
             }
             for(const summary of exportDateSummaryRows(dateGroup.rows)){
-                const r=ledger.addRow([summary.receivedQty?"Received":"",summary.receivedQty?summary.asset:"",summary.receivedQty||"","",summary.sentQty?"Sent":"",summary.sentQty?summary.asset:"",summary.sentQty||""]);
+                const r=ledger.addRow([summary.receivedQty?"Received":"",summary.receivedQty?summary.asset:"",summary.receivedQty||"","",summary.sentQty?"Sent":"",summary.sentQty?summary.asset:"",summary.sentQty||"",""]);
                 r.font={bold:true}; r.getCell(3).numFmt="#,##0"; r.getCell(7).numFmt="#,##0";
             }
             ledger.addRow([]); rowCursor=ledger.rowCount+1;
         }
-        ledger.autoFilter={from:"A1",to:`J${ledger.rowCount}`}; ledger.pageSetup={orientation:"landscape",fitToPage:true,fitToWidth:1,fitToHeight:0};
+        if (ledger.rowCount >= firstHistoryHeader) ledger.autoFilter={from:`A${firstHistoryHeader}`,to:`H${ledger.rowCount}`};
+        ledger.pageSetup={orientation:"landscape",fitToPage:true,fitToWidth:1,fitToHeight:0};
         const notes=wb.addWorksheet("Ledger Notes",{views:[{showGridLines:false}]}); notes.columns=[{header:"Field",key:"field",width:30},{header:"Meaning",key:"meaning",width:100}]; styleWorksheetHeader(notes.getRow(1));
-        notes.addRows([["Client",client],["Period",periodLabel],["Asset selection",data.assets.map(item=>item.asset).join(", ")||"All asset types"],["Ordering","Newest export dates appear first; earlier history stays below."],["Pictures","Photo cells remain clickable; XLSX may embed previews when available."]]);
+        notes.addRows([["Client",client],["Period",periodLabel],["Asset selection",data.assets.map(item=>item.asset).join(", ")||"All asset types"],["Ordering","Newest export dates appear first; earlier history stays below."],["Pictures","Photo links use descriptive copies in each client's MOVEMENTS folder under the configured Drive photo archive root; XLSX embeds compact previews when available."]]);
         notes.eachRow((row,i)=>{if(i>1)row.alignment={vertical:"top",wrapText:true};});
-        if(includePhotos){
-            // Images are embedded using the existing authenticated Drive image loader when available.
-            // The main sheet always keeps the source link, so failure to load a preview never loses the record.
-            for(const dateGroup of exportDateGroups(data)){
-                // Locate corresponding XLSX rows after construction by matching client/date/time/asset.
-                for(const row of dateGroup.rows){ if(!row.item.image) continue; }
-            }
-        }
         return wb;
     }
 
@@ -3025,7 +3619,7 @@ function bindQuickMenu() {
                 <div class="transaction-card-client"><img class="transaction-truck-icon" src="truck-icon.png" alt=""><div class="transaction-card-client-copy"><div class="eyebrow">CLIENT MOVEMENT</div><h3>${escapeHtml(group.client)}</h3></div></div>
                 <time class="transaction-card-time">${escapeHtml(formatTimestamp(group.timestamp))}</time>
             </div>
-            <div class="transaction-card-meta"><span class="transaction-card-line-count">${group.totalLines} ledger line${group.totalLines === 1 ? "" : "s"}</span>${attachment ? `<span class="transaction-attachment-mark">${attachment}</span>` : ""}</div>
+            <div class="transaction-card-meta"><span class="transaction-card-line-count">${group.totalLines} ledger line${group.totalLines === 1 ? "" : "s"}</span>${group.vehicleReg ? `<span class="transaction-vehicle-reg"><span>Vehicle reg</span><strong>${escapeHtml(group.vehicleReg)}</strong></span>` : ""}${attachment ? `<span class="transaction-attachment-mark">${attachment}</span>` : ""}</div>
             ${lines}
             <div class="transaction-card-footer"><span class="muted">${group.totalQuantity.toLocaleString("en-GB")} total quantity</span><button type="button" class="secondary" ${actionAttr}="${index}">View details</button></div>
         </article>`;
@@ -3041,7 +3635,7 @@ function bindQuickMenu() {
         const summary = $("info-summary");
         if (!summary) return;
         const sections = FM_TRANSACTION_DISPLAY.movementSections(group);
-        summary.innerHTML = `<div class="transaction-detail-note"><strong>${escapeHtml(group.client)}</strong><span> · ${escapeHtml(formatTimestamp(group.timestamp))}</span></div>${sections.map(section => {
+        summary.innerHTML = `<div class="transaction-detail-note"><strong>${escapeHtml(group.client)}</strong><span> · ${escapeHtml(formatTimestamp(group.timestamp))}</span>${group.vehicleReg ? `<span class="transaction-vehicle-reg"><span>Vehicle reg</span><strong>${escapeHtml(group.vehicleReg)}</strong></span>` : ""}</div>${sections.map(section => {
             const label = FM_TRANSACTION_DISPLAY.movementLabel(section.movement);
             const cls = section.movement === "RECEIVED" ? "received" : section.movement === "SENT" ? "sent" : section.movement === "DISCARD" ? "discard" : "other";
             const assets = FM_TRANSACTION_DISPLAY.aggregateAssets(section.items);
@@ -4012,7 +4606,7 @@ function bindQuickMenu() {
                 setMovementStatus("Uploading photo...");
                 const folderId = await getOrCreateDailyFolder(transactionDateKey(timestamp));
                 const uploadFile = await FM_MEDIA.optimizeImageForUpload(photoFile);
-                const uploaded = await uploadImageToDrive(uploadFile, folderId, buildPhotoFilename({client:"batch", movement:"MIXED", photoFile}));
+                const uploaded = await uploadImageToDrive(uploadFile, folderId, buildPhotoFilename({entries, prepared, timestamp, photoFile}));
                 imageLink = uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`;
             }
 
@@ -4172,11 +4766,36 @@ function bindQuickMenu() {
         );
     }
 
-    function buildPhotoFilename(data) {
-        const safeClient = String(data.client || "client").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "") || "client";
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const ext = data.photoFile?.type === "image/jpeg" ? ".jpg" : ((data.photoFile?.name?.match(/\.[a-zA-Z0-9]+$/) || [".jpg"])[0]);
-        return `${safeClient}-${data.movement}-${stamp}${ext}`;
+    function buildPhotoFilename(data = {}) {
+        const records = Array.isArray(data.prepared) && data.prepared.length
+            ? data.prepared
+            : (Array.isArray(data.entries) ? data.entries : []);
+        const clientNames = [...new Set(records.map(record => {
+            const movement = String(record?.movement || "").toUpperCase();
+            return String(movement === "DISCARD" ? (CONFIG.SELF_CLIENT_NAME || "HSC London (Self)") : (record?.client || "")).trim();
+        }).filter(Boolean))];
+        const fallbackClient = String(data.client || "").trim();
+        if (!clientNames.length && fallbackClient && !["batch", "unknown client", "client"].includes(fallbackClient.toLowerCase())) {
+            clientNames.push(fallbackClient);
+        }
+        const clientPart = clientNames.length
+            ? (clientNames.length <= 3 ? clientNames.join("-AND-") : `${clientNames[0]}-AND-${clientNames.length - 1}-OTHERS`)
+            : "UNKNOWN-CLIENT";
+        const safeClient = clientPart.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "UNKNOWN-CLIENT";
+        const movementNames = [...new Set(records.map(record => String(record?.movement || "").trim().toUpperCase()).filter(Boolean))];
+        const suppliedMovement = String(data.movement || "").trim().toUpperCase();
+        if (!movementNames.length && suppliedMovement && suppliedMovement !== "MIXED") movementNames.push(suppliedMovement);
+        const movementPart = movementNames.length === 1
+            ? (movementNames[0] === "DISCARD" ? "DISCARDED" : movementNames[0])
+            : "MIXED";
+        const suppliedDate = data.timestamp ? new Date(data.timestamp) : null;
+        const fileDate = suppliedDate && !Number.isNaN(suppliedDate.getTime()) ? suppliedDate : new Date();
+        const stamp = fileDate.toISOString().replace(/[:.]/g, "-");
+        const uniqueSuffix = Date.now().toString(36).toUpperCase();
+        const extension = data.photoFile?.type === "image/jpeg"
+            ? ".jpg"
+            : ((data.photoFile?.name?.match(/\.[a-zA-Z0-9]+$/) || [".jpg"])[0]);
+        return `${safeClient}-${movementPart}-${stamp}-${uniqueSuffix}${extension}`;
     }
 
 

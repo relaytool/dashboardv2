@@ -58,6 +58,15 @@ const CONFIG = {
     DRIVE_PHOTOS_PARENT_FOLDER_ID:
         "15NJveQRQ0WHR5FuR0E967dGs5bOBaPoH",
 
+    // Root Drive folder for client-specific report-photo archives. Each client gets
+    // its own uppercase folder (for example, SHEIN MOVEMENTS) beneath this folder.
+    DRIVE_CLIENT_LEDGER_PHOTOS_PARENT_FOLDER_ID:
+        "1hs6fIiuxvqmj7VL4dsqowu6EANgauoik",
+
+    // Kept as a legacy setting for compatibility with older report exports.
+    DRIVE_LEDGER_EXPORT_PHOTOS_FOLDER_NAME:
+        "Client Ledger Export Photos",
+
     /*
      * NOTE: broadened from "drive.readonly" to full "drive" so the app can
      * create the daily date-folders and upload photos into them. Existing
